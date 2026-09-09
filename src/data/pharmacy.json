@@ -1,0 +1,7 @@
+[
+  { "id": 1, "name": "Paracetamol 500mg", "category": "Analgesic", "stock": 1200, "supplier": "MedLife Distributors", "price": 2.5, "expiry": "2027-03-01" },
+  { "id": 2, "name": "Amoxicillin 250mg", "category": "Antibiotic", "stock": 340, "supplier": "PharmaCare Ltd.", "price": 6.0, "expiry": "2026-12-15" },
+  { "id": 3, "name": "Cetirizine 10mg", "category": "Antihistamine", "stock": 800, "supplier": "MedLife Distributors", "price": 1.8, "expiry": "2027-06-20" },
+  { "id": 4, "name": "Insulin Glargine", "category": "Hormone", "stock": 60, "supplier": "BioGen Supplies", "price": 450, "expiry": "2026-10-05" },
+  { "id": 5, "name": "Atorvastatin 20mg", "category": "Statin", "stock": 25, "supplier": "PharmaCare Ltd.", "price": 8.2, "expiry": "2026-09-10" }
+]

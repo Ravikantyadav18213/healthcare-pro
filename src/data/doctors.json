@@ -1,0 +1,10 @@
+[
+  { "id": 1, "name": "Dr. Meera Nair", "specialization": "Cardiology", "experience": 14, "rating": 4.8, "availability": "Available", "phone": "+91 98200 11223", "img": "MN" },
+  { "id": 2, "name": "Dr. Arjun Rao", "specialization": "Orthopedics", "experience": 9, "rating": 4.6, "availability": "In Surgery", "phone": "+91 98200 11224", "img": "AR" },
+  { "id": 3, "name": "Dr. Sana Iqbal", "specialization": "Pediatrics", "experience": 11, "rating": 4.9, "availability": "Available", "phone": "+91 98200 11225", "img": "SI" },
+  { "id": 4, "name": "Dr. Vikram Seth", "specialization": "Neurology", "experience": 17, "rating": 4.7, "availability": "On Leave", "phone": "+91 98200 11226", "img": "VS" },
+  { "id": 5, "name": "Dr. Leela Menon", "specialization": "General Medicine", "experience": 8, "rating": 4.5, "availability": "Available", "phone": "+91 98200 11227", "img": "LM" },
+  { "id": 6, "name": "Dr. Farah Sheikh", "specialization": "Dermatology", "experience": 6, "rating": 4.4, "availability": "Available", "phone": "+91 98200 11228", "img": "FS" },
+  { "id": 7, "name": "Dr. Kabir Malhotra", "specialization": "ENT", "experience": 12, "rating": 4.6, "availability": "In Ward", "phone": "+91 98200 11229", "img": "KM" },
+  { "id": 8, "name": "Dr. Ritu Bhalla", "specialization": "Gynecology", "experience": 15, "rating": 4.8, "availability": "Available", "phone": "+91 98200 11230", "img": "RB" }
+]

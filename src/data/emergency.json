@@ -1,0 +1,22 @@
+{
+  "ambulances": [
+    { "id": "AMB-01", "status": "Available", "location": "Bay 1" },
+    { "id": "AMB-02", "status": "On Call", "location": "En route" },
+    { "id": "AMB-03", "status": "Available", "location": "Bay 3" },
+    { "id": "AMB-04", "status": "Maintenance", "location": "Garage" }
+  ],
+  "icuBeds": { "total": 20, "occupied": 15 },
+  "bloodBank": [
+    { "type": "A+", "units": 24 },
+    { "type": "B+", "units": 18 },
+    { "type": "O+", "units": 30 },
+    { "type": "AB+", "units": 9 },
+    { "type": "O-", "units": 6 },
+    { "type": "A-", "units": 11 }
+  ],
+  "emergencyPatients": [
+    { "id": 1, "name": "Unknown — RTA Case", "severity": "Critical", "arrivedAt": "08:12" },
+    { "id": 2, "name": "Sunil Yadav", "severity": "Serious", "arrivedAt": "08:40" },
+    { "id": 3, "name": "Neha Joshi", "severity": "Stable", "arrivedAt": "09:05" }
+  ]
+}

@@ -1,0 +1,7 @@
+[
+  { "id": 1, "patient": "Ravi Kulkarni", "test": "Lipid Profile (Blood Test)", "status": "Completed", "date": "2026-08-01", "result": "Available" },
+  { "id": 2, "patient": "Thomas George", "test": "X-Ray — Hip", "status": "Completed", "date": "2026-08-02", "result": "Available" },
+  { "id": 3, "patient": "Priya Sharma", "test": "MRI — Brain", "status": "In Progress", "date": "2026-08-03", "result": "Pending" },
+  { "id": 4, "patient": "Fatima Sheikh", "test": "CT Scan — Chest", "status": "Scheduled", "date": "2026-08-04", "result": "Pending" },
+  { "id": 5, "patient": "Manoj Pillai", "test": "CBC (Blood Test)", "status": "Completed", "date": "2026-07-31", "result": "Available" }
+]

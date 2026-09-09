@@ -1,0 +1,8 @@
+[
+  { "id": 1, "patient": "Ravi Kulkarni", "doctor": "Dr. Meera Nair", "department": "Cardiology", "date": "2026-08-03", "time": "09:00", "type": "Follow-up", "status": "Confirmed" },
+  { "id": 2, "patient": "Ayesha Khan", "doctor": "Dr. Sana Iqbal", "department": "Pediatrics", "date": "2026-08-03", "time": "09:45", "type": "Vaccination", "status": "Confirmed" },
+  { "id": 3, "patient": "New Patient — Karan Vora", "doctor": "Dr. Leela Menon", "department": "General Medicine", "date": "2026-08-03", "time": "10:30", "type": "Consultation", "status": "Pending" },
+  { "id": 4, "patient": "Priya Sharma", "doctor": "Dr. Vikram Seth", "department": "Neurology", "date": "2026-08-03", "time": "11:15", "type": "Scan Review", "status": "Confirmed" },
+  { "id": 5, "patient": "Thomas George", "doctor": "Dr. Arjun Rao", "department": "Orthopedics", "date": "2026-08-04", "time": "13:00", "type": "Pre-surgery Check", "status": "Confirmed" },
+  { "id": 6, "patient": "Fatima Sheikh", "doctor": "Dr. Meera Nair", "department": "Cardiology", "date": "2026-08-04", "time": "14:30", "type": "Follow-up", "status": "Cancelled" }
+]

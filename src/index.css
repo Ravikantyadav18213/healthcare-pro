@@ -1,0 +1,329 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+
+/* ==================================================
+   GLOBAL
+================================================== */
+
+@layer base {
+  * {
+    font-family: "Plus Jakarta Sans", sans-serif;
+    box-sizing: border-box;
+  }
+
+  html {
+    scroll-behavior: smooth;
+  }
+
+  :root {
+    /* Height of the landing page's top bar: 44px logo + py-3 + border. */
+    --nav-h: 69px;
+  }
+
+  body {
+    margin: 0;
+    /* clip, not hidden: `hidden` makes body a scroll container and
+       breaks `position: sticky` on the navbar. */
+    overflow-x: clip;
+
+    @apply bg-slate-50 text-slate-800
+      dark:bg-slate-950
+      dark:text-slate-100;
+  }
+
+  button,
+  input,
+  select,
+  textarea {
+    font-family: inherit;
+  }
+
+  /* Visible keyboard focus everywhere, without a ring on mouse clicks. */
+  :focus-visible {
+    @apply outline-none ring-2 ring-brand-500 ring-offset-2
+      ring-offset-white dark:ring-offset-slate-950;
+  }
+}
+
+
+/*
+  These live in @layer components so that utility classes always win.
+
+  Without the layer, `.input-field`'s px-3 would be emitted after the
+  utilities and beat `pl-9` on same specificity — which is what made
+  placeholder text overlap the search icons.
+*/
+
+@layer components {
+
+  /* ==================================================
+     GLASS
+  ================================================== */
+
+  .glass {
+    @apply
+      bg-white/90
+      dark:bg-slate-900/90
+      backdrop-blur-xl
+      border
+      border-white/70
+      dark:border-slate-700/50
+      shadow-glass
+      rounded-2xl;
+  }
+
+  /*
+     The dark twin of .glass, for cards that sit on the hero clip.
+     A white panel there both hides the footage and clashes with the
+     chips beside it, so anything inside the video zone uses this.
+  */
+  .glass-dark {
+    @apply
+      bg-white/10
+      backdrop-blur-xl
+      border
+      border-white/15
+      shadow-lg
+      rounded-2xl;
+  }
+
+  .glass-dark-card {
+    @apply
+      glass-dark
+      p-5
+      transition-all
+      duration-300;
+  }
+
+  .glass-card {
+    @apply
+      glass
+      p-5
+      transition-all
+      duration-300;
+  }
+
+
+  /* ==================================================
+     BUTTONS
+  ================================================== */
+
+  .btn-primary {
+    @apply
+      bg-gradient-to-r
+      from-brand-500
+      to-brand-700
+      text-white
+      font-semibold
+      px-4
+      py-2
+      rounded-xl
+      shadow-md
+      hover:shadow-lg
+      hover:scale-[1.01]
+      transition-all
+      duration-200;
+  }
+
+  .btn-secondary {
+    @apply
+      bg-white
+      dark:bg-slate-800
+      border
+      border-slate-200
+      dark:border-slate-700
+      text-slate-700
+      dark:text-slate-200
+      font-medium
+      px-4
+      py-2
+      rounded-xl
+      hover:bg-slate-50
+      dark:hover:bg-slate-700
+      transition-all
+      duration-200;
+  }
+
+
+  /* ==================================================
+     INPUT
+  ================================================== */
+
+  .input-field {
+    @apply
+      w-full
+      px-3
+      py-2.5
+      rounded-xl
+      border
+      border-slate-200
+      dark:border-slate-700
+      bg-white
+      dark:bg-slate-800
+      text-slate-800
+      dark:text-white
+      placeholder:text-slate-400
+      focus:outline-none
+      focus:ring-2
+      focus:ring-brand-400
+      focus:border-brand-400
+      transition-all
+      text-sm;
+  }
+
+  /*
+    Inputs with a leading icon: leaves room for the icon and any trailing
+    buttons. Used together with .input-field so the spacing is
+    consistent on every search field in the application.
+  */
+  .input-icon {
+    @apply pl-10;
+  }
+
+  .input-icon-actions {
+    @apply pl-10 pr-20;
+  }
+
+
+  /* ==================================================
+     APP SHELL / SIDEBAR
+
+     The sidebar offset is authored CSS rather than Tailwind
+     utilities, so the layout can never break if a class fails to be
+     extracted, and one variable keeps the panel width and the content
+     offset in sync.
+
+       phone   no sidebar (drawer)      -> 0
+       tablet  16px inset + 64px rail   -> 5rem
+       desktop 16px inset + 240px panel -> 16rem
+  ================================================== */
+
+  .app-shell {
+    --sidebar-offset: 0px;
+  }
+
+  @media (min-width: 768px) {
+    .app-shell:not(.sidebar-collapsed) {
+      --sidebar-offset: 5rem;
+    }
+  }
+
+  @media (min-width: 1024px) {
+    .app-shell:not(.sidebar-collapsed) {
+      --sidebar-offset: 16rem;
+    }
+  }
+
+  .app-content {
+    padding-left: var(--sidebar-offset);
+    transition: padding-left 300ms cubic-bezier(0.16, 1, 0.3, 1);
+  }
+
+  .sidebar-panel {
+    transition:
+      transform 300ms cubic-bezier(0.16, 1, 0.3, 1),
+      opacity 220ms ease-out,
+      visibility 300ms;
+  }
+
+  /* Slides fully off-screen, past its own left inset. */
+  .app-shell.sidebar-collapsed .sidebar-panel {
+    transform: translateX(calc(-100% - 1.5rem));
+    opacity: 0;
+    visibility: hidden;
+  }
+
+  /* ---------- phone drawer ----------
+     Always mounted and moved with a transform. AnimatePresence is
+     avoided here: its exit bookkeeping does not settle reliably under
+     React StrictMode, which left the drawer stuck open.
+  */
+
+  .drawer-overlay {
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity 240ms ease-out;
+  }
+
+  .drawer-overlay.is-open {
+    opacity: 1;
+    pointer-events: auto;
+  }
+
+  .drawer-panel {
+    transform: translateX(-100%);
+    visibility: hidden;
+    transition:
+      transform 300ms cubic-bezier(0.16, 1, 0.3, 1),
+      visibility 300ms;
+  }
+
+  .drawer-panel.is-open {
+    transform: translateX(0);
+    visibility: visible;
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .app-content,
+    .sidebar-panel,
+    .drawer-panel,
+    .drawer-overlay {
+      transition: none;
+    }
+  }
+
+
+  /* ==================================================
+     BADGE
+  ================================================== */
+
+  .badge {
+    @apply
+      px-2.5
+      py-1
+      rounded-full
+      text-xs
+      font-semibold;
+  }
+}
+
+
+/* ==================================================
+   SCROLLBAR
+================================================== */
+
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+::-webkit-scrollbar-thumb {
+  background: #93c5fd;
+  border-radius: 8px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+
+/* ==================================================
+   SELECTION
+================================================== */
+
+::selection {
+  background: #bfdbfe;
+  color: #1e3a8a;
+}
+
+
+/* ==================================================
+   UTILITIES
+================================================== */
+
+/* Tabular figures so animated counters do not jitter. */
+.tabular-nums {
+  font-variant-numeric: tabular-nums;
+}

@@ -1,0 +1,6 @@
+[
+  { "id": "INV-1042", "patient": "Ravi Kulkarni", "amount": 12500, "gst": 625, "discount": 500, "status": "Paid", "date": "2026-08-01", "insurance": "Star Health" },
+  { "id": "INV-1043", "patient": "Ayesha Khan", "amount": 3200, "gst": 160, "discount": 0, "status": "Paid", "date": "2026-07-30", "insurance": "None" },
+  { "id": "INV-1044", "patient": "Thomas George", "amount": 48500, "gst": 2425, "discount": 2000, "status": "Pending", "date": "2026-08-02", "insurance": "ICICI Lombard" },
+  { "id": "INV-1045", "patient": "Priya Sharma", "amount": 9800, "gst": 490, "discount": 300, "status": "Pending", "date": "2026-07-28", "insurance": "None" }
+]

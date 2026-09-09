@@ -1,0 +1,10 @@
+[
+  { "id": 1, "name": "Cardiology", "doctors": 6, "patients": 42 },
+  { "id": 2, "name": "Neurology", "doctors": 4, "patients": 21 },
+  { "id": 3, "name": "Orthopedics", "doctors": 5, "patients": 33 },
+  { "id": 4, "name": "Pediatrics", "doctors": 7, "patients": 55 },
+  { "id": 5, "name": "Gynecology", "doctors": 4, "patients": 27 },
+  { "id": 6, "name": "Dermatology", "doctors": 3, "patients": 19 },
+  { "id": 7, "name": "ENT", "doctors": 3, "patients": 15 },
+  { "id": 8, "name": "General Medicine", "doctors": 8, "patients": 61 }
+]
