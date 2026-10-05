@@ -9,7 +9,7 @@ import * as appointments from "../services/appointmentService.js";
 
 /** GET /api/appointments/me — always scoped to the signed-in user. */
 export const listMine = asyncHandler(async (req, res) => {
-  const result = appointments.listAppointments({
+  const result = await appointments.listAppointments({
     userId: req.user.id,
     search: req.query.search || "",
     status: req.query.status || "all",
@@ -21,13 +21,13 @@ export const listMine = asyncHandler(async (req, res) => {
   res.json({
     success: true,
     ...result,
-    stats: appointments.appointmentStats(req.user.id),
+    stats: await appointments.appointmentStats(req.user.id),
   });
 });
 
 /** GET /api/appointments — admin only, hospital-wide. */
 export const listAll = asyncHandler(async (req, res) => {
-  const result = appointments.listAppointments({
+  const result = await appointments.listAppointments({
     search: req.query.search || "",
     status: req.query.status || "all",
     scope: req.query.scope || "",
@@ -42,19 +42,19 @@ export const listAll = asyncHandler(async (req, res) => {
   res.json({
     success: true,
     ...result,
-    stats: appointments.appointmentStats(),
+    stats: await appointments.appointmentStats(),
   });
 });
 
 export const getOne = asyncHandler(async (req, res) => {
-  const row = appointments.getOwnedAppointment(req.params.id, req.user);
-  res.json({ success: true, appointment: appointments.getAppointment(row.id) });
+  const row = await appointments.getOwnedAppointment(req.params.id, req.user);
+  res.json({ success: true, appointment: await appointments.getAppointment(row.id) });
 });
 
 export const nextForMe = asyncHandler(async (req, res) => {
   res.json({
     success: true,
-    appointment: appointments.nextAppointmentFor(req.user.id),
+    appointment: await appointments.nextAppointmentFor(req.user.id),
   });
 });
 
@@ -70,9 +70,9 @@ export const create = asyncHandler(async (req, res) => {
     reason: rules.string({ min: 3, max: 500, label: "Reason for visit" }),
   });
 
-  const appointment = appointments.createAppointment(req.user, req.body);
+  const appointment = await appointments.createAppointment(req.user, req.body);
 
-  audit(req, "appointment_created", {
+  await audit(req, "appointment_created", {
     entity: "appointment",
     entityId: appointment.id,
     details: `Appointment with ${appointment.doctorName} on ${appointment.date} at ${appointment.time}.`,
@@ -82,9 +82,9 @@ export const create = asyncHandler(async (req, res) => {
 });
 
 export const cancel = asyncHandler(async (req, res) => {
-  const appointment = appointments.cancelAppointment(req.user, req.params.id);
+  const appointment = await appointments.cancelAppointment(req.user, req.params.id);
 
-  audit(req, "appointment_cancelled", {
+  await audit(req, "appointment_cancelled", {
     entity: "appointment",
     entityId: appointment.id,
     details: `Cancelled appointment #${appointment.id}.`,
@@ -99,13 +99,13 @@ export const reschedule = asyncHandler(async (req, res) => {
     time: rules.time({ label: "New time" }),
   });
 
-  const appointment = appointments.rescheduleAppointment(
+  const appointment = await appointments.rescheduleAppointment(
     req.user,
     req.params.id,
     req.body
   );
 
-  audit(req, "appointment_rescheduled", {
+  await audit(req, "appointment_rescheduled", {
     entity: "appointment",
     entityId: appointment.id,
     details: `Moved to ${appointment.date} ${appointment.time}.`,
@@ -127,14 +127,14 @@ export const setStatus = asyncHandler(async (req, res) => {
     note: rules.string({ min: 0, max: 300, label: "Note" }),
   });
 
-  const appointment = appointments.updateAppointmentStatus(
+  const appointment = await appointments.updateAppointmentStatus(
     req.user,
     req.params.id,
     req.body.status,
     req.body.note
   );
 
-  audit(req, "appointment_status_changed", {
+  await audit(req, "appointment_status_changed", {
     entity: "appointment",
     entityId: appointment.id,
     details:
@@ -148,9 +148,9 @@ export const setStatus = asyncHandler(async (req, res) => {
 
 /** DELETE /api/appointments/:id — admin only. */
 export const remove = asyncHandler(async (req, res) => {
-  const removed = appointments.deleteAppointment(req.user, req.params.id);
+  const removed = await appointments.deleteAppointment(req.user, req.params.id);
 
-  audit(req, "appointment_deleted", {
+  await audit(req, "appointment_deleted", {
     entity: "appointment",
     entityId: removed.id,
     details: `Deleted appointment #${removed.id} (${removed.patientName} with ${removed.doctorName}).`,
@@ -160,12 +160,12 @@ export const remove = asyncHandler(async (req, res) => {
 });
 
 export const setNotes = asyncHandler(async (req, res) => {
-  const appointment = appointments.updateAppointmentNotes(
+  const appointment = await appointments.updateAppointmentNotes(
     req.params.id,
     req.body?.notes
   );
 
-  audit(req, "appointment_notes_updated", {
+  await audit(req, "appointment_notes_updated", {
     entity: "appointment",
     entityId: appointment.id,
   });
@@ -174,5 +174,5 @@ export const setNotes = asyncHandler(async (req, res) => {
 });
 
 export const stats = asyncHandler(async (req, res) => {
-  res.json({ success: true, stats: appointments.appointmentStats() });
+  res.json({ success: true, stats: await appointments.appointmentStats() });
 });

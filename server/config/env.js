@@ -53,16 +53,54 @@ export const config = {
   cookieSameSite: process.env.COOKIE_SAMESITE || "lax",
 
   /* ------------------------------------------------------------------
-     DATABASE / STORAGE
+     DATABASE (Turso / libSQL)
+
+     TURSO_DATABASE_URL unset -> falls back to a local libSQL file, so
+     `npm run dev:full` works with zero cloud accounts. Set both env
+     vars to point at a real Turso database (production, or a shared
+     dev database).
   ------------------------------------------------------------------ */
-  dbFile:
-    process.env.DB_FILE ||
-    path.join(ROOT, "server", "data", "healthcare.db"),
+  dbUrl:
+    process.env.TURSO_DATABASE_URL ||
+    `file:${path.join(ROOT, "server", "data", "healthcare.db")}`,
+  dbAuthToken: process.env.TURSO_AUTH_TOKEN || undefined,
 
-  uploadDir:
-    process.env.UPLOAD_DIR || path.join(ROOT, "server", "uploads"),
-
+  /* ------------------------------------------------------------------
+     FILE STORAGE (Vercel Blob)
+     BLOB_READ_WRITE_TOKEN is read directly by @vercel/blob itself;
+     nothing to add here beyond noting it's required in production.
+     uploadDir is the local-disk fallback used only when BLOB_READ_WRITE_TOKEN
+     is unset, so a plain `npm run dev:full` still works with no Blob store.
+  ------------------------------------------------------------------ */
+  uploadDir: process.env.UPLOAD_DIR || path.join(ROOT, "server", "uploads"),
   maxUploadBytes: Number(process.env.MAX_UPLOAD_BYTES || 5 * 1024 * 1024),
+
+  /* ------------------------------------------------------------------
+     SHARED STATE (Upstash Redis)
+     Rate limiting, OTP-attempt counters and the JWT revocation
+     denylist all need a store shared across serverless instances.
+     Unset in local dev -> falls back to an in-process Map (fine for
+     a single dev server, not for multiple deployed instances).
+  ------------------------------------------------------------------ */
+  redisUrl: process.env.UPSTASH_REDIS_REST_URL || null,
+  redisToken: process.env.UPSTASH_REDIS_REST_TOKEN || null,
+
+  /* ------------------------------------------------------------------
+     REALTIME (Pusher Channels)
+     Unset -> realtime.js silently no-ops (no live chat/notifications,
+     the rest of the app is unaffected).
+  ------------------------------------------------------------------ */
+  pusherAppId: process.env.PUSHER_APP_ID || null,
+  pusherKey: process.env.PUSHER_KEY || null,
+  pusherSecret: process.env.PUSHER_SECRET || null,
+  pusherCluster: process.env.PUSHER_CLUSTER || null,
+
+  /* ------------------------------------------------------------------
+     CRON ROUTES
+     Shared secret required in the `x-cron-secret` header by
+     /api/cron/* routes, so they can't be triggered by anyone else.
+  ------------------------------------------------------------------ */
+  cronSecret: process.env.CRON_SECRET || null,
 
   /* ------------------------------------------------------------------
      SEEDED ADMINISTRATOR

@@ -43,7 +43,7 @@ function authPayload(user, accessToken) {
  */
 const ADMIN_MAX_REMEMBER_DAYS = 1;
 
-function establishSession(req, res, user, persistent = false) {
+async function establishSession(req, res, user, persistent = false) {
   const accessToken = signAccessToken({
     id: user.id,
     email: user.email,
@@ -59,7 +59,7 @@ function establishSession(req, res, user, persistent = false) {
       : config.refreshTokenDays
     : 1;
 
-  const refreshToken = issueRefreshToken(user.id, req, keep, days);
+  const refreshToken = await issueRefreshToken(user.id, req, keep, days);
 
   setAuthCookies(res, {
     accessToken,
@@ -111,7 +111,7 @@ export const register = asyncHandler(async (req, res) => {
   }
 
   if (String(email).trim().toLowerCase() === config.adminEmail) {
-    audit(req, "register_failed", {
+    await audit(req, "register_failed", {
       actorEmail: String(email).trim().toLowerCase(),
       details: "Attempt to register using the reserved administrator email.",
     });
@@ -120,7 +120,7 @@ export const register = asyncHandler(async (req, res) => {
   }
 
   /* Role is never read from the request. Signup always creates a user. */
-  const user = authService.register({
+  const user = await authService.register({
     name,
     email,
     phone,
@@ -129,7 +129,7 @@ export const register = asyncHandler(async (req, res) => {
     gender,
   });
 
-  audit(req, "register", {
+  await audit(req, "register", {
     userId: user.id,
     actorEmail: user.email,
     actorRole: "user",
@@ -138,7 +138,7 @@ export const register = asyncHandler(async (req, res) => {
     details: `New account created for ${user.email}`,
   });
 
-  notify(user.id, {
+  await notify(user.id, {
     title: "Welcome to HealthCare Pro",
     message:
       "Your account is ready. Book your first appointment from the dashboard.",
@@ -173,26 +173,26 @@ export const login = asyncHandler(async (req, res) => {
   let user;
 
   try {
-    user = authService.login({ email, password });
+    user = await authService.login({ email, password });
   } catch (error) {
-    audit(req, "login_failed", {
+    await audit(req, "login_failed", {
       actorEmail: String(email).trim().toLowerCase(),
       details: error.message,
     });
     throw error;
   }
 
-  resetRateLimit(req, "login");
+  await resetRateLimit(req, "login");
 
   /*
    * With a second factor on, a correct password is only half the
    * proof — no session is established here. The browser gets an
    * opaque challenge to redeem at /auth/verify-2fa instead.
    */
-  if (config.twoFactorEnabled && twoFactor.isEnabled(user.id)) {
+  if (config.twoFactorEnabled && (await twoFactor.isEnabled(user.id))) {
     const challenge = await twoFactor.beginChallenge(user);
 
-    audit(req, "login_2fa_challenged", {
+    await audit(req, "login_2fa_challenged", {
       userId: user.id,
       actorEmail: user.email,
       actorRole: user.role,
@@ -211,7 +211,7 @@ export const login = asyncHandler(async (req, res) => {
     });
   }
 
-  const accessToken = establishSession(
+  const accessToken = await establishSession(
     req,
     res,
     user,
@@ -221,7 +221,7 @@ export const login = asyncHandler(async (req, res) => {
   const loginAction =
     user.role === "admin" ? "admin_login" : user.role === "doctor" ? "doctor_login" : "login";
 
-  audit(req, loginAction, {
+  await audit(req, loginAction, {
     userId: user.id,
     actorEmail: user.email,
     actorRole: user.role,
@@ -282,7 +282,7 @@ export const googleAuth = asyncHandler(async (req, res) => {
    * address, loginOrRegisterWithGoogle would create the account.
    */
   if (String(payload.email).trim().toLowerCase() === config.adminEmail) {
-    audit(req, "login_failed", {
+    await audit(req, "login_failed", {
       actorEmail: String(payload.email).trim().toLowerCase(),
       details: "Google sign-in attempted against the reserved administrator email.",
     });
@@ -292,22 +292,22 @@ export const googleAuth = asyncHandler(async (req, res) => {
     );
   }
 
-  const { user, created } = authService.loginOrRegisterWithGoogle({
+  const { user, created } = await authService.loginOrRegisterWithGoogle({
     email: payload.email,
     name: payload.name,
     emailVerified: payload.email_verified === true,
   });
 
-  resetRateLimit(req, "login");
+  await resetRateLimit(req, "login");
 
-  const accessToken = establishSession(
+  const accessToken = await establishSession(
     req,
     res,
     user,
     wantsPersistentSession(req.body)
   );
 
-  audit(req, created ? "register" : "login", {
+  await audit(req, created ? "register" : "login", {
     userId: user.id,
     actorEmail: user.email,
     actorRole: user.role,
@@ -319,7 +319,7 @@ export const googleAuth = asyncHandler(async (req, res) => {
   });
 
   if (created) {
-    notify(user.id, {
+    await notify(user.id, {
       title: "Welcome to HealthCare Pro",
       message:
         "Your account is ready. Book your first appointment from the dashboard.",
@@ -336,20 +336,20 @@ export const googleAuth = asyncHandler(async (req, res) => {
 ================================================================== */
 
 export const me = asyncHandler(async (req, res) => {
-  const user = authService.getUser(req.user.id);
+  const user = await authService.getUser(req.user.id);
   res.json({ success: true, user });
 });
 
 export const refresh = asyncHandler(async (req, res) => {
   const presented = readRefreshToken(req);
-  const session = consumeRefreshToken(presented);
+  const session = await consumeRefreshToken(presented);
 
   if (!session) {
     clearAuthCookies(res);
     throw ApiError.unauthorized("Your session has expired. Please sign in again.");
   }
 
-  const row = db
+  const row = await db
     .prepare(`SELECT id, name, email, role, status FROM users WHERE id = ?`)
     .get(session.user_id);
 
@@ -358,11 +358,11 @@ export const refresh = asyncHandler(async (req, res) => {
     throw ApiError.unauthorized("This account is no longer active.");
   }
 
-  const user = authService.getUser(row.id);
+  const user = await authService.getUser(row.id);
 
   /* Rotating the token must not silently upgrade a browser-session
      login into a persistent one, so the original choice is reused. */
-  const accessToken = establishSession(
+  const accessToken = await establishSession(
     req,
     res,
     user,
@@ -374,16 +374,16 @@ export const refresh = asyncHandler(async (req, res) => {
 
 export const logout = asyncHandler(async (req, res) => {
   const presented = readRefreshToken(req);
-  if (presented) revokeRefreshToken(presented);
+  if (presented) await revokeRefreshToken(presented);
 
   /* Clearing the cookie only stops THIS browser from sending the
      access token again; the token itself stays valid until it
      expires. Revoking it by id makes the sign-out immediate even if
      a copy was captured elsewhere. */
-  revokeAccessToken(readAccessToken(req));
+  await revokeAccessToken(readAccessToken(req));
 
   if (req.user) {
-    audit(req, "logout", {
+    await audit(req, "logout", {
       userId: req.user.id,
       actorEmail: req.user.email,
       actorRole: req.user.role,
@@ -396,8 +396,8 @@ export const logout = asyncHandler(async (req, res) => {
 });
 
 export const logoutAll = asyncHandler(async (req, res) => {
-  revokeAllSessions(req.user.id);
-  revokeAccessToken(readAccessToken(req));
+  await revokeAllSessions(req.user.id);
+  await revokeAccessToken(readAccessToken(req));
   clearAuthCookies(res);
   res.json({ success: true, message: "Signed out of all devices." });
 });
@@ -413,9 +413,9 @@ export const updateProfile = asyncHandler(async (req, res) => {
     dateOfBirth: rules.date({ required: false, label: "Date of birth" }),
   });
 
-  const user = authService.updateOwnProfile(req.user.id, req.body);
+  const user = await authService.updateOwnProfile(req.user.id, req.body);
 
-  audit(req, "profile_updated", {
+  await audit(req, "profile_updated", {
     entity: "user",
     entityId: req.user.id,
     details: "Profile details updated.",
@@ -430,13 +430,13 @@ export const changePassword = asyncHandler(async (req, res) => {
     newPassword: rules.password,
   });
 
-  authService.changePassword(req.user.id, req.body);
+  await authService.changePassword(req.user.id, req.body);
 
   /* Force every other device to sign in again. */
-  revokeAllSessions(req.user.id);
+  await revokeAllSessions(req.user.id);
   clearAuthCookies(res);
 
-  audit(req, "password_changed", {
+  await audit(req, "password_changed", {
     entity: "user",
     entityId: req.user.id,
     details: "Password changed; all sessions revoked.",
@@ -455,7 +455,7 @@ export const changePassword = asyncHandler(async (req, res) => {
 export const forgotPassword = asyncHandler(async (req, res) => {
   validate(req.body || {}, { email: rules.email });
 
-  const { email, user, otp } = authService.requestPasswordReset(req.body.email);
+  const { email, user, otp } = await authService.requestPasswordReset(req.body.email);
 
   let emailed = false;
   /*
@@ -481,7 +481,7 @@ export const forgotPassword = asyncHandler(async (req, res) => {
     if (!result.sent) mailError = result.reason;
   }
 
-  audit(req, "password_reset_requested", { actorEmail: email });
+  await audit(req, "password_reset_requested", { actorEmail: email });
 
   /*
    * Only reachable when the server is not in production — the local-
@@ -514,7 +514,7 @@ export const verifyResetOtp = asyncHandler(async (req, res) => {
     otp: rules.string({ min: 6, max: 6, label: "Code" }),
   });
 
-  authService.verifyPasswordResetOtp(req.body);
+  await authService.verifyPasswordResetOtp(req.body);
 
   res.json({ success: true, message: "Code verified." });
 });
@@ -526,10 +526,10 @@ export const resetPassword = asyncHandler(async (req, res) => {
     newPassword: rules.password,
   });
 
-  const userId = authService.resetPasswordWithOtp(req.body);
-  revokeAllSessions(userId);
+  const userId = await authService.resetPasswordWithOtp(req.body);
+  await revokeAllSessions(userId);
 
-  audit(req, "password_reset", {
+  await audit(req, "password_reset", {
     userId,
     entity: "user",
     entityId: userId,
@@ -552,17 +552,17 @@ export const verifyTwoFactor = asyncHandler(async (req, res) => {
   let userId;
 
   try {
-    ({ userId } = twoFactor.verifyChallenge({ challenge, code }));
+    ({ userId } = await twoFactor.verifyChallenge({ challenge, code }));
   } catch (error) {
-    audit(req, "login_2fa_failed", { details: error.message });
+    await audit(req, "login_2fa_failed", { details: error.message });
     throw error;
   }
 
-  const user = authService.getUser(userId);
+  const user = await authService.getUser(userId);
 
-  resetRateLimit(req, "login");
+  await resetRateLimit(req, "login");
 
-  const accessToken = establishSession(
+  const accessToken = await establishSession(
     req,
     res,
     user,
@@ -572,7 +572,7 @@ export const verifyTwoFactor = asyncHandler(async (req, res) => {
   const loginAction =
     user.role === "admin" ? "admin_login" : user.role === "doctor" ? "doctor_login" : "login";
 
-  audit(req, loginAction, {
+  await audit(req, loginAction, {
     userId: user.id,
     actorEmail: user.email,
     actorRole: user.role,
@@ -595,9 +595,9 @@ export const resendTwoFactor = asyncHandler(async (req, res) => {
 
   /* Re-proving the password is what stops this endpoint from being a
      free way to spam somebody's inbox with codes. */
-  const user = authService.login({ email, password });
+  const user = await authService.login({ email, password });
 
-  if (!twoFactor.isEnabled(user.id)) {
+  if (!(await twoFactor.isEnabled(user.id))) {
     throw ApiError.badRequest("Two-factor sign-in is not enabled for this account.");
   }
 
@@ -630,7 +630,7 @@ export const updateLanguage = asyncHandler(async (req, res) => {
     throw ApiError.badRequest("That language is not supported.");
   }
 
-  db.prepare(
+  await db.prepare(
     `UPDATE users SET language = ?, updated_at = datetime('now') WHERE id = ?`
   ).run(language, req.user.id);
 
@@ -641,15 +641,15 @@ export const updateLanguage = asyncHandler(async (req, res) => {
 export const updateTwoFactor = asyncHandler(async (req, res) => {
   const enabled = req.body?.enabled === true || req.body?.enabled === "true";
 
-  const result = twoFactor.setEnabled(req.user.id, enabled);
+  const result = await twoFactor.setEnabled(req.user.id, enabled);
 
-  audit(req, enabled ? "2fa_enabled" : "2fa_disabled", {
+  await audit(req, enabled ? "2fa_enabled" : "2fa_disabled", {
     userId: req.user.id,
     entity: "user",
     entityId: req.user.id,
   });
 
-  notify(req.user.id, {
+  await notify(req.user.id, {
     title: enabled ? "Two-factor sign-in enabled" : "Two-factor sign-in disabled",
     message: enabled
       ? "You will be emailed a code each time you sign in."

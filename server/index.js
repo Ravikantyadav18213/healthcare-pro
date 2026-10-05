@@ -9,7 +9,7 @@ import routes from "./routes/index.js";
 import { notFoundHandler, errorHandler } from "./middleware/error.js";
 import { purgeOldSessions } from "./services/tokenService.js";
 import { isAllowedOrigin } from "./utils/corsOrigins.js";
-import { initSockets } from "./sockets/index.js";
+import { isRealtimeConfigured } from "./utils/realtime.js";
 import { mailerConfigured, mailerTarget, verifyMailer } from "./utils/mailer.js";
 import { whatsappConfigured, whatsappTarget } from "./utils/whatsapp.js";
 import { startReminderScheduler } from "./services/reminderService.js";
@@ -94,63 +94,70 @@ app.use(errorHandler);
    STARTUP
 ================================================================== */
 
-runSeed();
-purgeOldSessions();
+await runSeed();
+await purgeOldSessions();
 
-const server = app.listen(config.port, () => {
-  console.log("");
-  console.log("  HealthCare Pro API");
-  console.log(`  ├─ listening   http://localhost:${config.port}`);
-  console.log(`  ├─ health      http://localhost:${config.port}/api/health`);
-  console.log(`  ├─ database    ${config.dbFile}`);
-  console.log(`  ├─ auth mode   ${config.authMode}`);
-  console.log(`  ├─ realtime    socket.io`);
-  console.log(`  ├─ client      ${config.clientUrl}`);
-  console.log(`  ├─ mail        ${mailerConfigured ? mailerTarget : "not configured"}`);
-  console.log(`  └─ whatsapp    ${whatsappConfigured ? whatsappTarget : "not configured"}`);
-  console.log("");
+/*
+ * On Vercel this module is only ever imported by api/index.js, whose
+ * exported `app` a serverless function invokes directly per-request —
+ * there is no process to keep alive, no port to bind, and a signal
+ * handler calling process.exit() would fight the platform's own
+ * function lifecycle. Vercel sets VERCEL=1 in every function's
+ * environment, so that's the switch: everything below runs only for
+ * `npm run server` / `npm run dev:full`, i.e. a real persistent host.
+ */
+if (!process.env.VERCEL) {
+  const server = app.listen(config.port, () => {
+    console.log("");
+    console.log("  HealthCare Pro API");
+    console.log(`  ├─ listening   http://localhost:${config.port}`);
+    console.log(`  ├─ health      http://localhost:${config.port}/api/health`);
+    console.log(`  ├─ database    ${config.dbUrl}`);
+    console.log(`  ├─ auth mode   ${config.authMode}`);
+    console.log(`  ├─ realtime    ${isRealtimeConfigured() ? "pusher" : "not configured"}`);
+    console.log(`  ├─ client      ${config.clientUrl}`);
+    console.log(`  ├─ mail        ${mailerConfigured ? mailerTarget : "not configured"}`);
+    console.log(`  └─ whatsapp    ${whatsappConfigured ? whatsappTarget : "not configured"}`);
+    console.log("");
 
-  /*
-   * Checked at boot rather than on the first password reset: a bad
-   * App Password would otherwise stay invisible until a real person
-   * was already waiting for a code that never arrives.
-   */
-  verifyMailer().then(({ ok, reason }) => {
-    if (ok) {
-      console.log(`  [mail] ready — password reset codes will be emailed.\n`);
-    } else {
-      console.warn(`  [mail] OUTGOING EMAIL IS OFF: ${reason}`);
-      console.warn(
-        `  [mail] Until this is fixed, /auth/forgot-password returns the code ` +
-          `in the response body (development only).\n`
-      );
-    }
-  });
-});
-
-initSockets(server);
-
-/* Started after the socket layer so the first sweep's in-app
-   notifications have somewhere to be pushed. */
-startReminderScheduler();
-
-function shutdown(signal) {
-  console.log(`\n[${signal}] shutting down...`);
-
-  server.close(() => {
-    try {
-      db.close();
-    } catch {
-      /* already closed */
-    }
-    process.exit(0);
+    /*
+     * Checked at boot rather than on the first password reset: a bad
+     * App Password would otherwise stay invisible until a real person
+     * was already waiting for a code that never arrives.
+     */
+    verifyMailer().then(({ ok, reason }) => {
+      if (ok) {
+        console.log(`  [mail] ready — password reset codes will be emailed.\n`);
+      } else {
+        console.warn(`  [mail] OUTGOING EMAIL IS OFF: ${reason}`);
+        console.warn(
+          `  [mail] Until this is fixed, /auth/forgot-password returns the code ` +
+            `in the response body (development only).\n`
+        );
+      }
+    });
   });
 
-  /* Do not hang forever if a socket refuses to close. */
-  setTimeout(() => process.exit(1), 5000).unref();
+  startReminderScheduler();
+
+  const shutdown = (signal) => {
+    console.log(`\n[${signal}] shutting down...`);
+
+    server.close(() => {
+      try {
+        db.close();
+      } catch {
+        /* already closed */
+      }
+      process.exit(0);
+    });
+
+    /* Do not hang forever if a socket refuses to close. */
+    setTimeout(() => process.exit(1), 5000).unref();
+  };
+
+  process.on("SIGINT", () => shutdown("SIGINT"));
+  process.on("SIGTERM", () => shutdown("SIGTERM"));
 }
-
-process.on("SIGINT", () => shutdown("SIGINT"));
-process.on("SIGTERM", () => shutdown("SIGTERM"));
 
 export default app;

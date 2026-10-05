@@ -7,28 +7,28 @@ import * as staff from "../services/staffService.js";
 export const list = asyncHandler(async (req, res) => {
   res.json({
     success: true,
-    users: users.listUsers({
+    users: await users.listUsers({
       search: req.query.search || "",
       status: req.query.status || "",
       role: req.query.role || "",
     }),
-    stats: users.userStats(),
+    stats: await users.userStats(),
   });
 });
 
 export const stats = asyncHandler(async (req, res) => {
-  res.json({ success: true, stats: users.userStats() });
+  res.json({ success: true, stats: await users.userStats() });
 });
 
 export const getOne = asyncHandler(async (req, res) => {
-  res.json({ success: true, user: users.getUserById(req.params.id) });
+  res.json({ success: true, user: await users.getUserById(req.params.id) });
 });
 
 export const history = asyncHandler(async (req, res) => {
   res.json({
     success: true,
-    user: users.getUserById(req.params.id),
-    ...users.userHistory(req.params.id),
+    user: await users.getUserById(req.params.id),
+    ...(await users.userHistory(req.params.id)),
   });
 });
 
@@ -37,9 +37,9 @@ export const setStatus = asyncHandler(async (req, res) => {
     status: rules.oneOf(["active", "inactive"], { label: "Status" }),
   });
 
-  const user = users.setUserStatus(req.user, req.params.id, req.body.status);
+  const user = await users.setUserStatus(req.user, req.params.id, req.body.status);
 
-  audit(req, user.status === "active" ? "user_activated" : "user_deactivated", {
+  await audit(req, user.status === "active" ? "user_activated" : "user_deactivated", {
     entity: "user",
     entityId: user.id,
     details: `${user.name} (${user.email}) set to ${user.status}.`,
@@ -55,12 +55,12 @@ export const setStatus = asyncHandler(async (req, res) => {
 export const listStaff = asyncHandler(async (req, res) => {
   res.json({
     success: true,
-    staff: staff.listStaff({
+    staff: await staff.listStaff({
       search: req.query.search || "",
       role: req.query.role || "",
       departmentId: req.query.departmentId || "",
     }),
-    stats: staff.staffStats(),
+    stats: await staff.staffStats(),
   });
 });
 
@@ -72,9 +72,9 @@ export const createStaff = asyncHandler(async (req, res) => {
     role: rules.oneOf(staff.STAFF_ROLES, { label: "Role" }),
   });
 
-  const created = staff.createStaff(req.body);
+  const created = await staff.createStaff(req.body);
 
-  audit(req, "staff_created", {
+  await audit(req, "staff_created", {
     entity: "user",
     entityId: created.id,
     details: `${created.name} added as ${created.role}.`,
@@ -84,9 +84,9 @@ export const createStaff = asyncHandler(async (req, res) => {
 });
 
 export const updateStaffDepartment = asyncHandler(async (req, res) => {
-  const updated = staff.setStaffDepartment(req.params.id, req.body?.departmentId ?? null);
+  const updated = await staff.setStaffDepartment(req.params.id, req.body?.departmentId ?? null);
 
-  audit(req, "staff_department_changed", {
+  await audit(req, "staff_department_changed", {
     entity: "user",
     entityId: updated.id,
     details: `${updated.name} → ${updated.departmentName || "unassigned"}.`,
@@ -96,9 +96,9 @@ export const updateStaffDepartment = asyncHandler(async (req, res) => {
 });
 
 export const updateStaffWard = asyncHandler(async (req, res) => {
-  const updated = staff.setStaffWard(req.params.id, req.body?.wardId ?? null);
+  const updated = await staff.setStaffWard(req.params.id, req.body?.wardId ?? null);
 
-  audit(req, "staff_ward_changed", {
+  await audit(req, "staff_ward_changed", {
     entity: "user",
     entityId: updated.id,
     details: `${updated.name} → ${updated.assignedWardName || "unassigned"}.`,
@@ -112,9 +112,9 @@ export const updateStaffDuty = asyncHandler(async (req, res) => {
     dutyStatus: rules.oneOf(staff.DUTY_STATUSES, { label: "Duty status" }),
   });
 
-  const updated = staff.setStaffDuty(req.params.id, req.body.dutyStatus);
+  const updated = await staff.setStaffDuty(req.params.id, req.body.dutyStatus);
 
-  audit(req, "staff_duty_changed", {
+  await audit(req, "staff_duty_changed", {
     entity: "user",
     entityId: updated.id,
     details: `${updated.name} → ${updated.dutyStatus}.`,

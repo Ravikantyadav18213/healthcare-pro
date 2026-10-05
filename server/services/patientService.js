@@ -1,7 +1,7 @@
 import db from "../db.js";
 import ApiError from "../utils/ApiError.js";
 import { publicPatient } from "../utils/sanitize.js";
-import { emitToAdmins } from "../sockets/index.js";
+import { emitToAdmins } from "../utils/realtime.js";
 
 const SELECT_PATIENT = `
   SELECT p.*,
@@ -14,7 +14,7 @@ const SELECT_PATIENT = `
 
 const findById = db.prepare(`${SELECT_PATIENT} WHERE p.id = ?`);
 
-export function listPatients({ search = "", departmentId = null, status = "", limit = null } = {}) {
+export async function listPatients({ search = "", departmentId = null, status = "", limit = null } = {}) {
   const where = [];
   const params = {};
 
@@ -49,18 +49,19 @@ export function listPatients({ search = "", departmentId = null, status = "", li
     ${params.limit ? "LIMIT @limit" : ""}
   `;
 
-  return db.prepare(sql).all(params).map(publicPatient);
+  const rows = await db.prepare(sql).all(params);
+  return rows.map(publicPatient);
 }
 
-export function getPatient(id) {
-  const row = findById.get(Number(id));
+export async function getPatient(id) {
+  const row = await findById.get(Number(id));
   if (!row) throw ApiError.notFound("Patient not found.");
   return publicPatient(row);
 }
 
 /** The patient profile linked to a signed-in user account. */
-export function getOwnPatient(userId) {
-  const row = db
+export async function getOwnPatient(userId) {
+  const row = await db
     .prepare(`${SELECT_PATIENT} WHERE p.user_id = ? ORDER BY p.id LIMIT 1`)
     .get(Number(userId));
 
@@ -90,10 +91,10 @@ function normalise(payload) {
   };
 }
 
-export function createPatient(payload) {
+export async function createPatient(payload) {
   const data = normalise(payload);
 
-  const result = db
+  const result = await db
     .prepare(
       `INSERT INTO patients
          (user_id, name, phone, email, date_of_birth, gender, blood_group,
@@ -107,80 +108,84 @@ export function createPatient(payload) {
     .run({ ...data, user_id: payload.userId ? Number(payload.userId) : null });
 
   /* Moves the Total Patients tile on the dashboard. */
-  emitToAdmins("dashboard:stats-changed", { source: "patients" });
+  await emitToAdmins("dashboard:stats-changed", { source: "patients" });
 
-  return publicPatient(findById.get(result.lastInsertRowid));
+  return publicPatient(await findById.get(result.lastInsertRowid));
 }
 
-export function updatePatient(id, payload) {
-  const existing = findById.get(Number(id));
+export async function updatePatient(id, payload) {
+  const existing = await findById.get(Number(id));
   if (!existing) throw ApiError.notFound("Patient not found.");
 
   const data = normalise(payload);
 
-  db.prepare(
-    `UPDATE patients
-        SET name = @name, phone = @phone, email = @email,
-            date_of_birth = @date_of_birth, gender = @gender,
-            blood_group = @blood_group, address = @address,
-            emergency_contact = @emergency_contact,
-            department_id = @department_id, doctor_id = @doctor_id,
-            room = @room, status = @status, admitted_at = @admitted_at,
-            medical_history = @medical_history,
-            updated_at = datetime('now')
-      WHERE id = @id`
-  ).run({ ...data, id: Number(id) });
+  await db
+    .prepare(
+      `UPDATE patients
+          SET name = @name, phone = @phone, email = @email,
+              date_of_birth = @date_of_birth, gender = @gender,
+              blood_group = @blood_group, address = @address,
+              emergency_contact = @emergency_contact,
+              department_id = @department_id, doctor_id = @doctor_id,
+              room = @room, status = @status, admitted_at = @admitted_at,
+              medical_history = @medical_history,
+              updated_at = datetime('now')
+        WHERE id = @id`
+    )
+    .run({ ...data, id: Number(id) });
 
   /* status can move to/from 'Discharged', which moves the Discharged
      Today tile on the dashboard. */
-  emitToAdmins("dashboard:stats-changed", { source: "patients" });
+  await emitToAdmins("dashboard:stats-changed", { source: "patients" });
 
-  return publicPatient(findById.get(Number(id)));
+  return publicPatient(await findById.get(Number(id)));
 }
 
 /** A user may edit only their own contact/medical details. */
-export function updateOwnPatient(userId, payload) {
-  const existing = db
+export async function updateOwnPatient(userId, payload) {
+  const existing = await db
     .prepare(`SELECT * FROM patients WHERE user_id = ? ORDER BY id LIMIT 1`)
     .get(Number(userId));
 
   if (!existing) throw ApiError.notFound("No patient profile linked to your account.");
 
-  db.prepare(
-    `UPDATE patients
-        SET phone = @phone, date_of_birth = @date_of_birth, gender = @gender,
-            blood_group = @blood_group, address = @address,
-            emergency_contact = @emergency_contact,
-            updated_at = datetime('now')
-      WHERE id = @id`
-  ).run({
-    id: existing.id,
-    phone: payload.phone ? String(payload.phone).trim() : null,
-    date_of_birth: payload.dateOfBirth || null,
-    gender: payload.gender || null,
-    blood_group: payload.bloodGroup || null,
-    address: payload.address ? String(payload.address).trim() : null,
-    emergency_contact: payload.emergencyContact
-      ? String(payload.emergencyContact).trim()
-      : null,
-  });
+  await db
+    .prepare(
+      `UPDATE patients
+          SET phone = @phone, date_of_birth = @date_of_birth, gender = @gender,
+              blood_group = @blood_group, address = @address,
+              emergency_contact = @emergency_contact,
+              updated_at = datetime('now')
+        WHERE id = @id`
+    )
+    .run({
+      id: existing.id,
+      phone: payload.phone ? String(payload.phone).trim() : null,
+      date_of_birth: payload.dateOfBirth || null,
+      gender: payload.gender || null,
+      blood_group: payload.bloodGroup || null,
+      address: payload.address ? String(payload.address).trim() : null,
+      emergency_contact: payload.emergencyContact
+        ? String(payload.emergencyContact).trim()
+        : null,
+    });
 
-  return publicPatient(findById.get(existing.id));
+  return publicPatient(await findById.get(existing.id));
 }
 
-export function deletePatient(id) {
-  const existing = findById.get(Number(id));
+export async function deletePatient(id) {
+  const existing = await findById.get(Number(id));
   if (!existing) throw ApiError.notFound("Patient not found.");
 
-  db.prepare(`DELETE FROM patients WHERE id = ?`).run(Number(id));
+  await db.prepare(`DELETE FROM patients WHERE id = ?`).run(Number(id));
 
-  emitToAdmins("dashboard:stats-changed", { source: "patients" });
+  await emitToAdmins("dashboard:stats-changed", { source: "patients" });
 
   return { id: Number(id), name: existing.name };
 }
 
-export function patientStats() {
-  const row = db
+export async function patientStats() {
+  const row = await db
     .prepare(
       `SELECT COUNT(*) AS total,
               SUM(CASE WHEN status = 'Critical' THEN 1 ELSE 0 END) AS critical,

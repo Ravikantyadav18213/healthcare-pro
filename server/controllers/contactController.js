@@ -23,7 +23,7 @@ export const submit = asyncHandler(async (req, res) => {
     ip: req.ip,
   });
 
-  audit(req, "contact_message_submitted", {
+  await audit(req, "contact_message_submitted", {
     entity: "contact_message",
     entityId: created.id,
     details: `${created.name} <${created.email}>${emailed ? "" : " (email delivery failed)"}`,
@@ -35,15 +35,15 @@ export const submit = asyncHandler(async (req, res) => {
 export const list = asyncHandler(async (req, res) => {
   res.json({
     success: true,
-    messages: contact.listContactMessages({ status: req.query.status || "" }),
-    stats: contact.contactMessageStats(),
+    messages: await contact.listContactMessages({ status: req.query.status || "" }),
+    stats: await contact.contactMessageStats(),
   });
 });
 
 export const markRead = asyncHandler(async (req, res) => {
-  const updated = contact.markContactMessageRead(req.params.id);
+  const updated = await contact.markContactMessageRead(req.params.id);
 
-  audit(req, "contact_message_read", {
+  await audit(req, "contact_message_read", {
     entity: "contact_message",
     entityId: updated.id,
   });
@@ -52,9 +52,9 @@ export const markRead = asyncHandler(async (req, res) => {
 });
 
 export const remove = asyncHandler(async (req, res) => {
-  const deleted = contact.deleteContactMessage(req.params.id);
+  const deleted = await contact.deleteContactMessage(req.params.id);
 
-  audit(req, "contact_message_deleted", {
+  await audit(req, "contact_message_deleted", {
     entity: "contact_message",
     entityId: deleted.id,
     details: `${deleted.name} <${deleted.email}>`,
@@ -70,7 +70,7 @@ export const reply = asyncHandler(async (req, res) => {
 
   const updated = await contact.replyToContactMessage(req.params.id, req.body.message.trim());
 
-  audit(req, "contact_message_replied", {
+  await audit(req, "contact_message_replied", {
     entity: "contact_message",
     entityId: updated.id,
     details: `Replied to ${updated.name} <${updated.email}>.`,

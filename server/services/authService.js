@@ -5,6 +5,7 @@ import db from "../db.js";
 import { config } from "../config/env.js";
 import ApiError from "../utils/ApiError.js";
 import { publicUser } from "../utils/sanitize.js";
+import { incr, pexpire, del } from "../utils/kv.js";
 
 /* ==================================================================
    QUERIES
@@ -59,17 +60,17 @@ const updatePassword = db.prepare(`
    REGISTRATION
 ================================================================== */
 
-export function register({ name, email, phone, password, dateOfBirth, gender }) {
+export async function register({ name, email, phone, password, dateOfBirth, gender }) {
   const cleanEmail = String(email).trim().toLowerCase();
 
-  if (findByEmail.get(cleanEmail)) {
+  if (await findByEmail.get(cleanEmail)) {
     throw ApiError.conflict("An account with this email already exists.");
   }
 
   const passwordHash = bcrypt.hashSync(password, config.bcryptRounds);
 
-  const created = db.transaction(() => {
-    const result = insertUser.run({
+  const created = await db.transaction(async () => {
+    const result = await insertUser.run({
       name: String(name).trim(),
       email: cleanEmail,
       phone: phone ? String(phone).trim() : null,
@@ -82,7 +83,7 @@ export function register({ name, email, phone, password, dateOfBirth, gender }) 
 
     /* Every registered user also gets a linked patient profile so
        they can be attached to appointments and reports. */
-    insertPatientProfile.run(
+    await insertPatientProfile.run(
       userId,
       String(name).trim(),
       phone ? String(phone).trim() : null,
@@ -91,7 +92,7 @@ export function register({ name, email, phone, password, dateOfBirth, gender }) 
       gender || null
     );
 
-    return findById.get(userId);
+    return await findById.get(userId);
   })();
 
   return publicUser(created);
@@ -101,9 +102,9 @@ export function register({ name, email, phone, password, dateOfBirth, gender }) 
    LOGIN
 ================================================================== */
 
-export function login({ email, password }) {
+export async function login({ email, password }) {
   const cleanEmail = String(email).trim().toLowerCase();
-  const user = findByEmail.get(cleanEmail);
+  const user = await findByEmail.get(cleanEmail);
 
   /*
    * bcrypt.compare is run even when the account is missing so the
@@ -113,7 +114,7 @@ export function login({ email, password }) {
   const matches = bcrypt.compareSync(password, hash);
 
   if (!user || !matches) {
-    if (user) markLoginFailure.run(user.id);
+    if (user) await markLoginFailure.run(user.id);
     throw ApiError.unauthorized("Invalid email or password.");
   }
 
@@ -123,26 +124,26 @@ export function login({ email, password }) {
     );
   }
 
-  markLoginSuccess.run(user.id);
+  await markLoginSuccess.run(user.id);
 
-  return publicUser(findById.get(user.id));
+  return publicUser(await findById.get(user.id));
 }
 
 /* ==================================================================
    PROFILE
 ================================================================== */
 
-export function getUser(id) {
-  const user = findById.get(id);
+export async function getUser(id) {
+  const user = await findById.get(id);
   if (!user) throw ApiError.notFound("Account not found.");
   return publicUser(user);
 }
 
-export function updateOwnProfile(id, { name, phone, dateOfBirth, gender }) {
-  const existing = findById.get(id);
+export async function updateOwnProfile(id, { name, phone, dateOfBirth, gender }) {
+  const existing = await findById.get(id);
   if (!existing) throw ApiError.notFound("Account not found.");
 
-  updateProfile.run({
+  await updateProfile.run({
     id,
     name: String(name).trim(),
     phone: phone ? String(phone).trim() : null,
@@ -151,7 +152,7 @@ export function updateOwnProfile(id, { name, phone, dateOfBirth, gender }) {
   });
 
   /* Keep the linked patient profile in step. */
-  db.prepare(
+  await db.prepare(
     `UPDATE patients
         SET name = ?, phone = ?, date_of_birth = ?, gender = ?,
             updated_at = datetime('now')
@@ -164,11 +165,11 @@ export function updateOwnProfile(id, { name, phone, dateOfBirth, gender }) {
     id
   );
 
-  return publicUser(findById.get(id));
+  return publicUser(await findById.get(id));
 }
 
-export function changePassword(id, { currentPassword, newPassword }) {
-  const user = findById.get(id);
+export async function changePassword(id, { currentPassword, newPassword }) {
+  const user = await findById.get(id);
   if (!user) throw ApiError.notFound("Account not found.");
 
   if (!bcrypt.compareSync(currentPassword, user.password_hash)) {
@@ -177,7 +178,7 @@ export function changePassword(id, { currentPassword, newPassword }) {
     });
   }
 
-  updatePassword.run(bcrypt.hashSync(newPassword, config.bcryptRounds), id);
+  await updatePassword.run(bcrypt.hashSync(newPassword, config.bcryptRounds), id);
   return true;
 }
 
@@ -245,51 +246,42 @@ const randomOtp = () => String(crypto.randomInt(0, 1_000_000)).padStart(6, "0");
  * after this many wrong guesses every outstanding code for the
  * account is burned and a new request is required — makes the code
  * unguessable regardless of how the requests are distributed. Kept in
- * memory (like the rate limiter) so no schema change is needed; a
- * process restart simply resets the count, which is safe because the
- * codes also expire in 10 minutes.
+ * the shared kv store (server/utils/kv.js, Redis in production) so no
+ * schema change is needed; the count naturally expires alongside the
+ * codes it's guarding, which are only ever valid for 10 minutes.
  */
 const MAX_OTP_ATTEMPTS = 10;
-const otpAttempts = new Map();
 
-const otpSweep = setInterval(() => {
-  const now = Date.now();
-  for (const [key, entry] of otpAttempts) {
-    if (entry.resetAt <= now) otpAttempts.delete(key);
-  }
-}, 60_000);
-otpSweep.unref?.();
+function otpAttemptsKey(userId) {
+  return `otp-attempts:${userId}`;
+}
 
-function registerOtpFailure(userId) {
-  const now = Date.now();
-  let entry = otpAttempts.get(userId);
-  if (!entry || entry.resetAt <= now) {
-    entry = { count: 0, resetAt: now + OTP_TTL_MINUTES * 60 * 1000 };
-    otpAttempts.set(userId, entry);
-  }
-  entry.count += 1;
+async function registerOtpFailure(userId) {
+  const key = otpAttemptsKey(userId);
+  const count = await incr(key);
+  if (count === 1) await pexpire(key, OTP_TTL_MINUTES * 60 * 1000);
 
-  if (entry.count >= MAX_OTP_ATTEMPTS) {
+  if (count >= MAX_OTP_ATTEMPTS) {
     /* Too many misses on this account — throw the codes away so the
        correct one can no longer be reached even by chance. */
-    deleteResetsForUser.run(userId);
-    otpAttempts.delete(userId);
+    await deleteResetsForUser.run(userId);
+    await del(key);
   }
 }
 
-function clearOtpFailures(userId) {
-  otpAttempts.delete(userId);
+async function clearOtpFailures(userId) {
+  await del(otpAttemptsKey(userId));
 }
 
 /* token_hash is UNIQUE across ALL users (not just the current one), so
    a fresh 6-digit code can — rarely — collide with another user's
    still-live code. Retried a few times with a new random code rather
    than surfacing a 409 to someone whose email is otherwise fine. */
-function insertResetRetrying(userId) {
+async function insertResetRetrying(userId) {
   for (let attempt = 0; attempt < 5; attempt += 1) {
     const otp = randomOtp();
     try {
-      insertReset.run(userId, sha(otp), OTP_TTL_MINUTES);
+      await insertReset.run(userId, sha(otp), OTP_TTL_MINUTES);
       return otp;
     } catch (error) {
       if (error?.code !== "SQLITE_CONSTRAINT_UNIQUE" && error?.code !== "SQLITE_CONSTRAINT") {
@@ -308,11 +300,11 @@ function insertResetRetrying(userId) {
  * still returned so the response (and any dev-only fallback built on
  * it) is not itself a second, cheaper oracle.
  */
-export function requestPasswordReset(email) {
+export async function requestPasswordReset(email) {
   const cleanEmail = String(email).trim().toLowerCase();
-  const user = findByEmail.get(cleanEmail);
+  const user = await findByEmail.get(cleanEmail);
 
-  deleteExpiredResets.run();
+  await deleteExpiredResets.run();
 
   if (!user) return { email: cleanEmail, user: null, otp: randomOtp() };
 
@@ -321,39 +313,39 @@ export function requestPasswordReset(email) {
      old code leaked or screenshotted earlier keeps being usable
      indefinitely, even after the user thinks they have moved on from
      it by requesting/using a newer one. */
-  deleteResetsForUser.run(user.id);
-  const otp = insertResetRetrying(user.id);
+  await deleteResetsForUser.run(user.id);
+  const otp = await insertResetRetrying(user.id);
 
   return { email: cleanEmail, user, otp };
 }
 
 /** Checks the code without spending it — used by the "enter code" step. */
-export function verifyPasswordResetOtp({ email, otp }) {
-  const user = findByEmail.get(String(email).trim().toLowerCase());
-  const record = user ? findReset.get(user.id, sha(String(otp || ""))) : null;
+export async function verifyPasswordResetOtp({ email, otp }) {
+  const user = await findByEmail.get(String(email).trim().toLowerCase());
+  const record = user ? await findReset.get(user.id, sha(String(otp || ""))) : null;
 
   if (!record) {
-    if (user) registerOtpFailure(user.id);
+    if (user) await registerOtpFailure(user.id);
     throw ApiError.badRequest("That code is invalid or has expired.");
   }
 
-  if (user) clearOtpFailures(user.id);
+  if (user) await clearOtpFailures(user.id);
   return true;
 }
 
-export function resetPasswordWithOtp({ email, otp, newPassword }) {
-  const user = findByEmail.get(String(email).trim().toLowerCase());
-  const record = user ? findReset.get(user.id, sha(String(otp || ""))) : null;
+export async function resetPasswordWithOtp({ email, otp, newPassword }) {
+  const user = await findByEmail.get(String(email).trim().toLowerCase());
+  const record = user ? await findReset.get(user.id, sha(String(otp || ""))) : null;
 
   if (!record) {
-    if (user) registerOtpFailure(user.id);
+    if (user) await registerOtpFailure(user.id);
     throw ApiError.badRequest("That code is invalid or has expired.");
   }
 
-  clearOtpFailures(user.id);
+  await clearOtpFailures(user.id);
 
-  db.transaction(() => {
-    updatePassword.run(
+  await db.transaction(async () => {
+    await updatePassword.run(
       bcrypt.hashSync(newPassword, config.bcryptRounds),
       user.id
     );
@@ -361,7 +353,7 @@ export function resetPasswordWithOtp({ email, otp, newPassword }) {
        redeemed — a sibling code from an earlier "resend" must not
        remain able to reset the password again after recovery is
        already considered complete. */
-    deleteResetsForUser.run(user.id);
+    await deleteResetsForUser.run(user.id);
   })();
 
   return user.id;
@@ -386,7 +378,7 @@ export function resetPasswordWithOtp({ email, otp, newPassword }) {
    than a special-cased column.
 ================================================================== */
 
-export function loginOrRegisterWithGoogle({ email, name, emailVerified }) {
+export async function loginOrRegisterWithGoogle({ email, name, emailVerified }) {
   if (!emailVerified) {
     throw ApiError.forbidden(
       "Your Google account's email address is not verified."
@@ -394,7 +386,7 @@ export function loginOrRegisterWithGoogle({ email, name, emailVerified }) {
   }
 
   const cleanEmail = String(email).trim().toLowerCase();
-  const existing = findByEmail.get(cleanEmail);
+  const existing = await findByEmail.get(cleanEmail);
 
   if (existing) {
     if (existing.status !== "active") {
@@ -403,8 +395,8 @@ export function loginOrRegisterWithGoogle({ email, name, emailVerified }) {
       );
     }
 
-    markLoginSuccess.run(existing.id);
-    return { user: publicUser(findById.get(existing.id)), created: false };
+    await markLoginSuccess.run(existing.id);
+    return { user: publicUser(await findById.get(existing.id)), created: false };
   }
 
   /* A random password nobody is ever told. The account is reachable
@@ -413,8 +405,8 @@ export function loginOrRegisterWithGoogle({ email, name, emailVerified }) {
   const unusablePassword = crypto.randomBytes(24).toString("hex");
   const passwordHash = bcrypt.hashSync(unusablePassword, config.bcryptRounds);
 
-  const created = db.transaction(() => {
-    const result = insertUser.run({
+  const created = await db.transaction(async () => {
+    const result = await insertUser.run({
       name: String(name || cleanEmail.split("@")[0]).trim(),
       email: cleanEmail,
       phone: null,
@@ -425,7 +417,7 @@ export function loginOrRegisterWithGoogle({ email, name, emailVerified }) {
 
     const userId = result.lastInsertRowid;
 
-    insertPatientProfile.run(
+    await insertPatientProfile.run(
       userId,
       String(name || cleanEmail.split("@")[0]).trim(),
       null,
@@ -434,8 +426,8 @@ export function loginOrRegisterWithGoogle({ email, name, emailVerified }) {
       null
     );
 
-    markLoginSuccess.run(userId);
-    return findById.get(userId);
+    await markLoginSuccess.run(userId);
+    return await findById.get(userId);
   })();
 
   return { user: publicUser(created), created: true };

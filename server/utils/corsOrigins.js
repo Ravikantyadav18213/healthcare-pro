@@ -1,9 +1,10 @@
 import { config } from "../config/env.js";
 
 /*
- * Shared with Socket.IO's own CORS check (server/sockets/index.js) so
- * the realtime channel and the REST API always agree on which origins
- * may present the auth cookies.
+ * Which browser origins may present the auth cookies on a REST call.
+ * Realtime (Pusher) has no CORS surface of its own — the browser
+ * talks to Pusher directly, authorized via POST /api/realtime/auth,
+ * which goes through this same check as any other route.
  */
 
 const allowedOrigins = new Set(

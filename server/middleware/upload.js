@@ -4,6 +4,7 @@ import multer from "multer";
 
 import { config } from "../config/env.js";
 import ApiError from "../utils/ApiError.js";
+import { storeFile } from "../utils/storage.js";
 
 /* ==================================================================
    REPORT FILE UPLOADS
@@ -11,7 +12,12 @@ import ApiError from "../utils/ApiError.js";
    Only document and image formats a clinician would actually attach
    are accepted. Executables, archives and scripts are rejected on
    both extension and declared MIME type, and the stored filename is
-   randomly generated so nothing user-supplied reaches the file system.
+   randomly generated so nothing user-supplied reaches storage.
+
+   Files are held in memory only long enough to hand the buffer to
+   storeFile() (Vercel Blob in production, local disk in dev) — never
+   written to Multer's own disk storage, since a serverless function
+   has no persistent filesystem to write to.
 ================================================================== */
 
 const ALLOWED = new Map([
@@ -38,20 +44,6 @@ const ALLOWED_EXTENSIONS = new Set([
   ".docx",
 ]);
 
-const storage = multer.diskStorage({
-  destination(_req, _file, cb) {
-    cb(null, config.uploadDir);
-  },
-  filename(_req, file, cb) {
-    const extension =
-      ALLOWED.get(file.mimetype) ||
-      path.extname(file.originalname).toLowerCase() ||
-      ".bin";
-
-    cb(null, `${Date.now()}-${crypto.randomBytes(8).toString("hex")}${extension}`);
-  },
-});
-
 function fileFilter(_req, file, cb) {
   const extension = path.extname(file.originalname).toLowerCase();
 
@@ -67,7 +59,7 @@ function fileFilter(_req, file, cb) {
 }
 
 const multerUpload = multer({
-  storage,
+  storage: multer.memoryStorage(),
   fileFilter,
   limits: {
     fileSize: config.maxUploadBytes,
@@ -77,32 +69,24 @@ const multerUpload = multer({
 
 /** Single optional "file" field, with multer errors translated. */
 export function uploadReportFile(req, res, next) {
-  multerUpload.single("file")(req, res, (error) => {
-    if (!error) return next();
+  multerUpload.single("file")(req, res, async (error) => {
+    if (error) return handleMulterError(error, config.maxUploadBytes, next);
 
-    if (error instanceof multer.MulterError) {
-      if (error.code === "LIMIT_FILE_SIZE") {
-        return next(
-          ApiError.badRequest(
-            `File is too large. Maximum size is ${Math.round(
-              config.maxUploadBytes / (1024 * 1024)
-            )} MB.`
-          )
-        );
-      }
-      return next(ApiError.badRequest(`Upload failed: ${error.message}`));
+    try {
+      await persist(req.file, ALLOWED);
+      next();
+    } catch (err) {
+      next(err);
     }
-
-    return next(error);
   });
 }
 
-/** Normalises a multer file into the shape reportService expects. */
+/** Normalises an uploaded file into the shape reportService expects. */
 export function describeUpload(file) {
   if (!file) return null;
 
   return {
-    storedName: path.basename(file.filename),
+    storedName: file.location,
     originalName: file.originalname,
     mimeType: file.mimetype,
     size: file.size,
@@ -130,26 +114,6 @@ const CHAT_ALLOWED = new Map([
   ["audio/aac", ".aac"],
 ]);
 
-const chatStorage = multer.diskStorage({
-  destination(_req, _file, cb) {
-    cb(null, config.uploadDir);
-  },
-  filename(_req, file, cb) {
-    /*
-     * A browser sends "audio/webm;codecs=opus" — the parameters are
-     * stripped before the extension is looked up.
-     */
-    const mime = String(file.mimetype || "").split(";")[0].trim();
-
-    const extension =
-      CHAT_ALLOWED.get(mime) ||
-      path.extname(file.originalname).toLowerCase() ||
-      ".bin";
-
-    cb(null, `chat-${Date.now()}-${crypto.randomBytes(8).toString("hex")}${extension}`);
-  },
-});
-
 function chatFileFilter(_req, file, cb) {
   const mime = String(file.mimetype || "").split(";")[0].trim();
 
@@ -165,7 +129,7 @@ function chatFileFilter(_req, file, cb) {
 }
 
 const chatMulter = multer({
-  storage: chatStorage,
+  storage: multer.memoryStorage(),
   fileFilter: chatFileFilter,
   limits: {
     fileSize: config.maxUploadBytes,
@@ -175,23 +139,15 @@ const chatMulter = multer({
 
 /** Single required "file" field for a chat attachment. */
 export function uploadChatAttachment(req, res, next) {
-  chatMulter.single("file")(req, res, (error) => {
-    if (!error) return next();
+  chatMulter.single("file")(req, res, async (error) => {
+    if (error) return handleMulterError(error, config.maxUploadBytes, next);
 
-    if (error instanceof multer.MulterError) {
-      if (error.code === "LIMIT_FILE_SIZE") {
-        return next(
-          ApiError.badRequest(
-            `Attachment is too large. Maximum size is ${Math.round(
-              config.maxUploadBytes / (1024 * 1024)
-            )} MB.`
-          )
-        );
-      }
-      return next(ApiError.badRequest(`Upload failed: ${error.message}`));
+    try {
+      await persist(req.file, CHAT_ALLOWED, "chat-");
+      next();
+    } catch (err) {
+      next(err);
     }
-
-    return next(error);
   });
 }
 
@@ -202,4 +158,41 @@ export function chatMessageTypeFor(mimeType) {
   if (mime.startsWith("image/")) return "image";
   if (mime.startsWith("audio/")) return "audio";
   return "file";
+}
+
+/* ==================================================================
+   SHARED HELPERS
+================================================================== */
+
+/** Uploads the parsed multer file to storage and stamps `file.location`. */
+async function persist(file, allowList, prefix = "") {
+  if (!file) return;
+
+  /* A browser sends "audio/webm;codecs=opus" — the parameters are
+     stripped before the extension is looked up. */
+  const mime = String(file.mimetype || "").split(";")[0].trim();
+
+  const extension =
+    allowList.get(mime) ||
+    path.extname(file.originalname).toLowerCase() ||
+    ".bin";
+
+  const storedName = `${prefix}${Date.now()}-${crypto.randomBytes(8).toString("hex")}${extension}`;
+
+  file.location = await storeFile(storedName, file.buffer, mime);
+}
+
+function handleMulterError(error, maxBytes, next) {
+  if (error instanceof multer.MulterError) {
+    if (error.code === "LIMIT_FILE_SIZE") {
+      return next(
+        ApiError.badRequest(
+          `File is too large. Maximum size is ${Math.round(maxBytes / (1024 * 1024))} MB.`
+        )
+      );
+    }
+    return next(ApiError.badRequest(`Upload failed: ${error.message}`));
+  }
+
+  return next(error);
 }

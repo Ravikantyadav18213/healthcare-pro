@@ -6,7 +6,7 @@ import {
   publicChatMessage,
   publicChatRequest,
 } from "../utils/sanitize.js";
-import { emitToUser, emitToUsers, isUserOnline } from "../sockets/index.js";
+import { emitToUser, emitToUsers, isUserOnline } from "../utils/realtime.js";
 
 /* ==================================================================
    PATIENT <-> ADMIN / PATIENT <-> DOCTOR MESSAGING
@@ -102,13 +102,14 @@ const insertRequest = db.prepare(`
     (@patient_id, @doctor_id, @reason, @appointment_id, @initial_message, 'pending')
 `);
 
-function unreadCountFor(conversationId, viewerId) {
-  return db
+async function unreadCountFor(conversationId, viewerId) {
+  const row = await db
     .prepare(
       `SELECT COUNT(*) AS n FROM chat_messages
         WHERE conversation_id = ? AND sender_id != ? AND is_read = 0`
     )
-    .get(conversationId, viewerId).n;
+    .get(conversationId, viewerId);
+  return row.n;
 }
 
 /**
@@ -116,10 +117,10 @@ function unreadCountFor(conversationId, viewerId) {
  * For a patient-admin thread the "other end" is the admin desk as a
  * whole, so any connected administrator counts as online.
  */
-function counterpartOf(row, viewerId) {
+async function counterpartOf(row, viewerId) {
   if (row.type === "patient_admin") {
     return Number(row.patient_id) === Number(viewerId)
-      ? findActiveAdmins.all().map((a) => a.id)
+      ? (await findActiveAdmins.all()).map((a) => a.id)
       : [row.patient_id];
   }
 
@@ -128,20 +129,22 @@ function counterpartOf(row, viewerId) {
   ].filter(Boolean);
 }
 
-function counterpartOnline(row, viewerId) {
-  return counterpartOf(row, viewerId).some((id) => isUserOnline(id));
+async function counterpartOnline(row, viewerId) {
+  const counterparts = await counterpartOf(row, viewerId);
+  const online = await Promise.all(counterparts.map((id) => isUserOnline(id)));
+  return online.some(Boolean);
 }
 
 /** Every account with a stake in this thread — used for notifications and sockets. */
-function conversationRecipients(row) {
+async function conversationRecipients(row) {
   if (row.type === "patient_admin") {
-    return [row.patient_id, ...findActiveAdmins.all().map((a) => a.id)];
+    return [row.patient_id, ...(await findActiveAdmins.all()).map((a) => a.id)];
   }
   return [row.patient_id, row.doctor_id].filter(Boolean);
 }
 
-export function getConversationRow(id) {
-  const row = findConversationById.get(Number(id));
+export async function getConversationRow(id) {
+  const row = await findConversationById.get(Number(id));
   if (!row) throw ApiError.notFound("Conversation not found.");
   return row;
 }
@@ -163,13 +166,13 @@ export function isConversationParticipant(row, user) {
 }
 
 /** The one gate that matters: has an administrator actually approved this pair? */
-export function isDoctorChatApproved(row) {
+export async function isDoctorChatApproved(row) {
   if (row?.type !== "patient_doctor") return true; // n/a for admin threads
   if (row?.status !== "active") return false;
 
   if (!row.approval_request_id) return false;
 
-  const approval = db
+  const approval = await db
     .prepare(`SELECT status FROM chat_approval_requests WHERE id = ?`)
     .get(row.approval_request_id);
 
@@ -180,10 +183,10 @@ export function canAccessConversation(row, user) {
   return isConversationParticipant(row, user);
 }
 
-export function canSendMessage(row, user) {
+export async function canSendMessage(row, user) {
   if (!isConversationParticipant(row, user)) return false;
   if (row.status !== "active") return false;
-  if (row.type === "patient_doctor") return isDoctorChatApproved(row);
+  if (row.type === "patient_doctor") return await isDoctorChatApproved(row);
   return true;
 }
 
@@ -194,18 +197,45 @@ export function requireParticipant(row, user) {
 }
 
 /**
+ * Relay a typing signal to the other side of this conversation.
+ *
+ * Used to run inside the socket.io connection handler itself (the
+ * sender's identity came from the authenticated socket, so it could
+ * never be spoofed). Now an ordinary authenticated route, checked
+ * against the database exactly the same way — a client cannot type
+ * into a conversation it is not part of, or pretend to be someone
+ * else. A malformed or unauthorized ping is simply not relayed,
+ * never an error — same as the socket handler it replaces.
+ */
+export async function relayTyping(user, conversationId, typing) {
+  const row = await findConversationById.get(Number(conversationId));
+  if (!row || row.status !== "active") return;
+  if (!isConversationParticipant(row, user)) return;
+
+  const recipients = await conversationRecipients(row);
+  const others = recipients.filter((id) => Number(id) !== Number(user.id));
+
+  await emitToUsers(others, "chat:typing", {
+    conversationId: row.id,
+    userId: user.id,
+    name: user.name,
+    typing: Boolean(typing),
+  });
+}
+
+/**
  * The enforcement point for POST .../messages. Every failure mode maps
  * to the exact business rule from the spec: an unapproved, rejected,
  * revoked, pending or archived thread returns 403, never a 200.
  */
-function assertSendable(row, user) {
+async function assertSendable(row, user) {
   requireParticipant(row, user);
 
   if (row.status === "archived") {
     throw ApiError.forbidden("This conversation has been archived.");
   }
 
-  if (row.status !== "active" || !canSendMessage(row, user)) {
+  if (row.status !== "active" || !(await canSendMessage(row, user))) {
     throw ApiError.forbidden(
       "Doctor communication has not been approved by the administrator."
     );
@@ -216,11 +246,11 @@ function assertSendable(row, user) {
    CONVERSATIONS
 ================================================================== */
 
-export function listConversations(user) {
+export async function listConversations(user) {
   let rows;
 
   if (user.role === "admin") {
-    rows = db
+    rows = await db
       .prepare(
         `${SELECT_CONVERSATION} WHERE c.type = 'patient_admin'
           ORDER BY COALESCE(last_message_at, c.created_at) DESC`
@@ -229,7 +259,7 @@ export function listConversations(user) {
   } else if (user.role === "doctor") {
     /* Only conversations an administrator has actually activated — a
        pending request never shows up here as if it were live. */
-    rows = db
+    rows = await db
       .prepare(
         `${SELECT_CONVERSATION}
           WHERE c.type = 'patient_doctor' AND c.doctor_id = @doctorId AND c.status = 'active'
@@ -237,7 +267,7 @@ export function listConversations(user) {
       )
       .all({ doctorId: user.id });
   } else {
-    rows = db
+    rows = await db
       .prepare(
         `${SELECT_CONVERSATION} WHERE c.patient_id = @patientId
           ORDER BY COALESCE(last_message_at, c.created_at) DESC`
@@ -245,46 +275,48 @@ export function listConversations(user) {
       .all({ patientId: user.id });
   }
 
-  return rows.map((row) =>
-    publicConversation(
-      {
-        ...row,
-        unread_count: unreadCountFor(row.id, user.id),
-        online: counterpartOnline(row, user.id),
-      },
-      user.id
+  return Promise.all(
+    rows.map(async (row) =>
+      publicConversation(
+        {
+          ...row,
+          unread_count: await unreadCountFor(row.id, user.id),
+          online: await counterpartOnline(row, user.id),
+        },
+        user.id
+      )
     )
   );
 }
 
-export function getConversation(user, id) {
-  const row = getConversationRow(id);
+export async function getConversation(user, id) {
+  const row = await getConversationRow(id);
   requireParticipant(row, user);
 
   return publicConversation(
     {
       ...row,
-      unread_count: unreadCountFor(row.id, user.id),
-      online: counterpartOnline(row, user.id),
+      unread_count: await unreadCountFor(row.id, user.id),
+      online: await counterpartOnline(row, user.id),
     },
     user.id
   );
 }
 
 /** POST /api/chat/admin — always allowed, never gated by approval. */
-export function getOrCreateAdminConversation(patient) {
+export async function getOrCreateAdminConversation(patient) {
   if (patient.role !== "user") {
     throw ApiError.forbidden("Only patients can start a conversation with the administrator.");
   }
 
-  let row = db
+  let row = await db
     .prepare(
       `${SELECT_CONVERSATION} WHERE c.patient_id = ? AND c.type = 'patient_admin'`
     )
     .get(patient.id);
 
   if (!row) {
-    const result = insertConversation.run({
+    const result = await insertConversation.run({
       patient_id: patient.id,
       doctor_id: null,
       admin_id: null,
@@ -293,9 +325,9 @@ export function getOrCreateAdminConversation(patient) {
       status: "active",
     });
 
-    row = findConversationById.get(result.lastInsertRowid);
+    row = await findConversationById.get(result.lastInsertRowid);
 
-    notifyAdmins({
+    await notifyAdmins({
       title: "New patient conversation",
       message: `${patient.name} started a conversation with the administrator.`,
       type: "info",
@@ -304,7 +336,7 @@ export function getOrCreateAdminConversation(patient) {
   }
 
   return publicConversation(
-    { ...row, unread_count: unreadCountFor(row.id, patient.id) },
+    { ...row, unread_count: await unreadCountFor(row.id, patient.id) },
     patient.id
   );
 }
@@ -313,19 +345,19 @@ export function getOrCreateAdminConversation(patient) {
    DOCTOR CHAT APPROVAL WORKFLOW
 ================================================================== */
 
-export function getDoctorRequestRow(id) {
-  const row = findRequestById.get(Number(id));
+export async function getDoctorRequestRow(id) {
+  const row = await findRequestById.get(Number(id));
   if (!row) throw ApiError.notFound("Doctor chat request not found.");
   return row;
 }
 
 /** POST /api/chat/doctor-request — creates a pending request only; never opens the chat. */
-export function createDoctorChatRequest(patient, { doctorId, appointmentId, reason, initialMessage }) {
+export async function createDoctorChatRequest(patient, { doctorId, appointmentId, reason, initialMessage }) {
   if (patient.role !== "user") {
     throw ApiError.forbidden("Only patients can request doctor communication.");
   }
 
-  const doctor = db.prepare(`SELECT * FROM doctors WHERE id = ?`).get(Number(doctorId));
+  const doctor = await db.prepare(`SELECT * FROM doctors WHERE id = ?`).get(Number(doctorId));
   if (!doctor) throw ApiError.badRequest("Select a valid doctor.");
   if (doctor.status !== "active") {
     throw ApiError.conflict("This doctor is not currently available for communication.");
@@ -339,14 +371,14 @@ export function createDoctorChatRequest(patient, { doctorId, appointmentId, reas
   }
 
   if (appointmentId) {
-    const appt = db
+    const appt = await db
       .prepare(`SELECT id FROM appointments WHERE id = ? AND user_id = ?`)
       .get(Number(appointmentId), patient.id);
     if (!appt) throw ApiError.badRequest("That appointment reference is not valid.");
   }
 
   if (doctor.user_id) {
-    const activeConversation = db
+    const activeConversation = await db
       .prepare(
         `SELECT id FROM chat_conversations
           WHERE patient_id = ? AND doctor_id = ? AND type = 'patient_doctor' AND status = 'active'`
@@ -361,13 +393,13 @@ export function createDoctorChatRequest(patient, { doctorId, appointmentId, reas
   let requestId;
 
   try {
-    requestId = insertRequest.run({
+    requestId = (await insertRequest.run({
       patient_id: patient.id,
       doctor_id: doctor.id,
       reason: cleanReason,
       appointment_id: appointmentId ? Number(appointmentId) : null,
       initial_message: initialMessage ? String(initialMessage).trim().slice(0, 2000) : null,
-    }).lastInsertRowid;
+    })).lastInsertRowid;
   } catch (error) {
     if (String(error.code || "").startsWith("SQLITE_CONSTRAINT")) {
       throw ApiError.conflict("You already have a pending request for this doctor.");
@@ -378,7 +410,7 @@ export function createDoctorChatRequest(patient, { doctorId, appointmentId, reas
   /* A locked placeholder conversation lets the patient see "waiting for
      approval" immediately, without granting any messaging ability. */
   if (doctor.user_id) {
-    let conversation = db
+    let conversation = await db
       .prepare(
         `SELECT * FROM chat_conversations
           WHERE patient_id = ? AND doctor_id = ? AND type = 'patient_doctor'`
@@ -388,41 +420,41 @@ export function createDoctorChatRequest(patient, { doctorId, appointmentId, reas
     let conversationId;
 
     if (!conversation) {
-      conversationId = insertConversation.run({
+      conversationId = (await insertConversation.run({
         patient_id: patient.id,
         doctor_id: doctor.user_id,
         admin_id: null,
         type: "patient_doctor",
         approval_request_id: requestId,
         status: "pending",
-      }).lastInsertRowid;
+      })).lastInsertRowid;
     } else {
       conversationId = conversation.id;
-      db.prepare(
+      await db.prepare(
         `UPDATE chat_conversations
             SET status = 'pending', approval_request_id = ?, updated_at = datetime('now')
           WHERE id = ?`
       ).run(requestId, conversationId);
     }
 
-    db.prepare(`UPDATE chat_approval_requests SET conversation_id = ? WHERE id = ?`).run(
+    await db.prepare(`UPDATE chat_approval_requests SET conversation_id = ? WHERE id = ?`).run(
       conversationId,
       requestId
     );
   }
 
-  notifyAdmins({
+  await notifyAdmins({
     title: "New doctor chat approval request",
     message: `New doctor chat approval request from ${patient.name} for ${doctor.name}.`,
     type: "warning",
     link: "/admin/messages",
   });
 
-  return publicChatRequest(findRequestById.get(requestId));
+  return publicChatRequest(await findRequestById.get(requestId));
 }
 
 /** GET /api/chat/doctor-requests — admin sees every request, a patient sees only their own. */
-export function listDoctorRequests(user, status) {
+export async function listDoctorRequests(user, status) {
   const where = [];
   const params = {};
 
@@ -440,18 +472,19 @@ export function listDoctorRequests(user, status) {
     ${where.length ? `WHERE ${where.join(" AND ")}` : ""}
     ORDER BY r.requested_at DESC`;
 
-  return db.prepare(sql).all(params).map(publicChatRequest);
+  const rows = await db.prepare(sql).all(params);
+  return rows.map(publicChatRequest);
 }
 
 /** PATCH /api/chat/doctor-requests/:id/approve — the only path that opens a doctor chat. */
-export function approveDoctorRequest(admin, id) {
-  const row = getDoctorRequestRow(id);
+export async function approveDoctorRequest(admin, id) {
+  const row = await getDoctorRequestRow(id);
 
   if (row.status !== "pending") {
     throw ApiError.conflict(`This request has already been ${row.status}.`);
   }
 
-  const doctor = db.prepare(`SELECT * FROM doctors WHERE id = ?`).get(row.doctor_id);
+  const doctor = await db.prepare(`SELECT * FROM doctors WHERE id = ?`).get(row.doctor_id);
 
   if (!doctor?.user_id) {
     throw ApiError.conflict(
@@ -459,14 +492,14 @@ export function approveDoctorRequest(admin, id) {
     );
   }
 
-  const conversation = db.transaction(() => {
-    db.prepare(
+  const conversation = await db.transaction(async () => {
+    await db.prepare(
       `UPDATE chat_approval_requests
           SET status = 'approved', reviewed_at = datetime('now'), reviewed_by = ?
         WHERE id = ?`
     ).run(admin.id, row.id);
 
-    let conv = db
+    let conv = await db
       .prepare(
         `SELECT * FROM chat_conversations
           WHERE patient_id = ? AND doctor_id = ? AND type = 'patient_doctor'`
@@ -476,30 +509,30 @@ export function approveDoctorRequest(admin, id) {
     let conversationId;
 
     if (!conv) {
-      conversationId = insertConversation.run({
+      conversationId = (await insertConversation.run({
         patient_id: row.patient_id,
         doctor_id: doctor.user_id,
         admin_id: admin.id,
         type: "patient_doctor",
         approval_request_id: row.id,
         status: "active",
-      }).lastInsertRowid;
+      })).lastInsertRowid;
     } else {
       conversationId = conv.id;
-      db.prepare(
+      await db.prepare(
         `UPDATE chat_conversations
             SET status = 'active', admin_id = ?, approval_request_id = ?, updated_at = datetime('now')
           WHERE id = ?`
       ).run(admin.id, row.id, conversationId);
     }
 
-    db.prepare(`UPDATE chat_approval_requests SET conversation_id = ? WHERE id = ?`).run(
+    await db.prepare(`UPDATE chat_approval_requests SET conversation_id = ? WHERE id = ?`).run(
       conversationId,
       row.id
     );
 
     if (row.initial_message) {
-      insertMessage.run({
+      await insertMessage.run({
         conversation_id: conversationId,
         sender_id: row.patient_id,
         sender_role: "user",
@@ -513,17 +546,17 @@ export function approveDoctorRequest(admin, id) {
       });
     }
 
-    return findConversationById.get(conversationId);
+    return await findConversationById.get(conversationId);
   })();
 
-  notify(row.patient_id, {
+  await notify(row.patient_id, {
     title: "Doctor chat approved",
     message: `Your chat request with ${doctor.name} has been approved.`,
     type: "success",
     link: "/messages",
   });
 
-  notify(doctor.user_id, {
+  await notify(doctor.user_id, {
     title: "New approved patient chat",
     message: `Admin approved a chat request from ${row.patient_name || "a patient"}.`,
     type: "success",
@@ -531,18 +564,18 @@ export function approveDoctorRequest(admin, id) {
   });
 
   const recipients = [row.patient_id, doctor.user_id];
-  emitToUsers(recipients, "chat:request-updated", { requestId: row.id, status: "approved" });
-  emitToUsers(
+  await emitToUsers(recipients, "chat:request-updated", { requestId: row.id, status: "approved" });
+  await emitToUsers(
     recipients,
     "chat:conversation-updated",
     publicConversation({ ...conversation, unread_count: 0 })
   );
 
-  return publicChatRequest(findRequestById.get(row.id));
+  return publicChatRequest(await findRequestById.get(row.id));
 }
 
-export function rejectDoctorRequest(admin, id, rejectionReason) {
-  const row = getDoctorRequestRow(id);
+export async function rejectDoctorRequest(admin, id, rejectionReason) {
+  const row = await getDoctorRequestRow(id);
 
   if (row.status !== "pending") {
     throw ApiError.conflict(`This request has already been ${row.status}.`);
@@ -550,19 +583,19 @@ export function rejectDoctorRequest(admin, id, rejectionReason) {
 
   const cleanReason = rejectionReason ? String(rejectionReason).trim().slice(0, 300) : null;
 
-  db.prepare(
+  await db.prepare(
     `UPDATE chat_approval_requests
         SET status = 'rejected', reviewed_at = datetime('now'), reviewed_by = ?, rejection_reason = ?
       WHERE id = ?`
   ).run(admin.id, cleanReason, row.id);
 
   if (row.conversation_id) {
-    db.prepare(
+    await db.prepare(
       `UPDATE chat_conversations SET status = 'locked', updated_at = datetime('now') WHERE id = ?`
     ).run(row.conversation_id);
   }
 
-  notify(row.patient_id, {
+  await notify(row.patient_id, {
     title: "Doctor chat request not approved",
     message:
       `Your chat request with ${row.doctor_name} was not approved by the administrator.` +
@@ -571,41 +604,41 @@ export function rejectDoctorRequest(admin, id, rejectionReason) {
     link: "/messages",
   });
 
-  emitToUser(row.patient_id, "chat:request-updated", { requestId: row.id, status: "rejected" });
+  await emitToUser(row.patient_id, "chat:request-updated", { requestId: row.id, status: "rejected" });
 
   if (row.conversation_id) {
-    emitToUser(
+    await emitToUser(
       row.patient_id,
       "chat:conversation-updated",
-      publicConversation(findConversationById.get(row.conversation_id))
+      publicConversation(await findConversationById.get(row.conversation_id))
     );
   }
 
-  return publicChatRequest(findRequestById.get(row.id));
+  return publicChatRequest(await findRequestById.get(row.id));
 }
 
-export function revokeDoctorRequest(admin, id) {
-  const row = getDoctorRequestRow(id);
+export async function revokeDoctorRequest(admin, id) {
+  const row = await getDoctorRequestRow(id);
 
   if (row.status !== "approved") {
     throw ApiError.conflict("Only an approved request can be revoked.");
   }
 
-  db.prepare(
+  await db.prepare(
     `UPDATE chat_approval_requests
         SET status = 'revoked', reviewed_at = datetime('now'), reviewed_by = ?
       WHERE id = ?`
   ).run(admin.id, row.id);
 
   if (row.conversation_id) {
-    db.prepare(
+    await db.prepare(
       `UPDATE chat_conversations SET status = 'revoked', updated_at = datetime('now') WHERE id = ?`
     ).run(row.conversation_id);
   }
 
-  const doctor = db.prepare(`SELECT * FROM doctors WHERE id = ?`).get(row.doctor_id);
+  const doctor = await db.prepare(`SELECT * FROM doctors WHERE id = ?`).get(row.doctor_id);
 
-  notify(row.patient_id, {
+  await notify(row.patient_id, {
     title: "Doctor communication disabled",
     message: `Your communication with ${row.doctor_name} has been disabled by the administrator.`,
     type: "warning",
@@ -613,7 +646,7 @@ export function revokeDoctorRequest(admin, id) {
   });
 
   if (doctor?.user_id) {
-    notify(doctor.user_id, {
+    await notify(doctor.user_id, {
       title: "Patient chat access revoked",
       message: `Admin revoked chat access with ${row.patient_name || "a patient"}.`,
       type: "warning",
@@ -622,52 +655,53 @@ export function revokeDoctorRequest(admin, id) {
   }
 
   const recipients = [row.patient_id, doctor?.user_id].filter(Boolean);
-  emitToUsers(recipients, "chat:request-updated", { requestId: row.id, status: "revoked" });
+  await emitToUsers(recipients, "chat:request-updated", { requestId: row.id, status: "revoked" });
 
   if (row.conversation_id) {
-    emitToUsers(
+    await emitToUsers(
       recipients,
       "chat:conversation-updated",
-      publicConversation(findConversationById.get(row.conversation_id))
+      publicConversation(await findConversationById.get(row.conversation_id))
     );
   }
 
-  return publicChatRequest(findRequestById.get(row.id));
+  return publicChatRequest(await findRequestById.get(row.id));
 }
 
 /* ==================================================================
    MESSAGES
 ================================================================== */
 
-export function listMessages(conversationId, user, { page = 1, limit = 50 } = {}) {
-  const row = getConversationRow(conversationId);
+export async function listMessages(conversationId, user, { page = 1, limit = 50 } = {}) {
+  const row = await getConversationRow(conversationId);
   requireParticipant(row, user);
 
   const take = Math.min(Number(limit) || 50, 100);
   const currentPage = Math.max(Number(page) || 1, 1);
   const skip = (currentPage - 1) * take;
 
-  const total = db
+  const totalRow = await db
     .prepare(`SELECT COUNT(*) AS n FROM chat_messages WHERE conversation_id = ?`)
-    .get(row.id).n;
+    .get(row.id);
+  const total = totalRow.n;
 
-  const rows = db
+  const rows = await db
     .prepare(
       `${SELECT_MESSAGE} WHERE m.conversation_id = ? ORDER BY m.id DESC LIMIT ? OFFSET ?`
     )
     .all(row.id, take, skip);
 
   /* Opening the thread marks the other side's messages read. */
-  const changed = db
+  const changed = (await db
     .prepare(
       `UPDATE chat_messages
           SET is_read = 1, updated_at = datetime('now')
         WHERE conversation_id = ? AND sender_id != ? AND is_read = 0`
     )
-    .run(row.id, user.id).changes;
+    .run(row.id, user.id)).changes;
 
   if (changed > 0) {
-    emitToUsers(conversationRecipients(row), "chat:read", {
+    await emitToUsers(await conversationRecipients(row), "chat:read", {
       conversationId: row.id,
       readerId: user.id,
     });
@@ -675,7 +709,7 @@ export function listMessages(conversationId, user, { page = 1, limit = 50 } = {}
 
   return {
     conversation: publicConversation(
-      { ...row, unread_count: 0, online: counterpartOnline(row, user.id) },
+      { ...row, unread_count: 0, online: await counterpartOnline(row, user.id) },
       user.id
     ),
     items: rows.reverse().map(publicChatMessage),
@@ -693,7 +727,7 @@ export function listMessages(conversationId, user, { page = 1, limit = 50 } = {}
  * status/approval -> save -> notify -> return. A pending, locked or
  * revoked conversation never reaches the INSERT.
  */
-export function sendMessage(
+export async function sendMessage(
   user,
   conversationId,
   {
@@ -706,8 +740,8 @@ export function sendMessage(
     attachmentDuration = null,
   }
 ) {
-  const row = getConversationRow(conversationId);
-  assertSendable(row, user);
+  const row = await getConversationRow(conversationId);
+  await assertSendable(row, user);
 
   const cleanMessage = String(message || "").trim();
 
@@ -718,7 +752,7 @@ export function sendMessage(
     throw ApiError.validation({ message: "Message is too long (4000 characters max)." });
   }
 
-  const result = insertMessage.run({
+  const result = await insertMessage.run({
     conversation_id: row.id,
     sender_id: user.id,
     sender_role: user.role,
@@ -731,15 +765,15 @@ export function sendMessage(
     attachment_duration: attachmentDuration ? Number(attachmentDuration) : null,
   });
 
-  db.prepare(`UPDATE chat_conversations SET updated_at = datetime('now') WHERE id = ?`).run(row.id);
+  await db.prepare(`UPDATE chat_conversations SET updated_at = datetime('now') WHERE id = ?`).run(row.id);
 
-  const created = db.prepare(`${SELECT_MESSAGE} WHERE m.id = ?`).get(result.lastInsertRowid);
+  const created = await db.prepare(`${SELECT_MESSAGE} WHERE m.id = ?`).get(result.lastInsertRowid);
   const publicMessage = publicChatMessage(created);
 
-  const recipients = conversationRecipients(row).filter((id) => id !== user.id);
+  const recipients = (await conversationRecipients(row)).filter((id) => id !== user.id);
 
   for (const recipientId of recipients) {
-    const recipient = db.prepare(`SELECT role FROM users WHERE id = ?`).get(recipientId);
+    const recipient = await db.prepare(`SELECT role FROM users WHERE id = ?`).get(recipientId);
     const link =
       recipient?.role === "admin"
         ? "/admin/messages"
@@ -747,7 +781,7 @@ export function sendMessage(
         ? "/doctor/messages"
         : "/messages";
 
-    notify(recipientId, {
+    await notify(recipientId, {
       title: user.role === "user" ? `New message from ${user.name}` : "New message",
       message:
         cleanMessage.slice(0, 140) ||
@@ -761,12 +795,12 @@ export function sendMessage(
     });
   }
 
-  const updatedRow = getConversationRow(row.id);
-  emitToUsers(conversationRecipients(row), "chat:message", {
+  const updatedRow = await getConversationRow(row.id);
+  await emitToUsers(await conversationRecipients(row), "chat:message", {
     conversationId: row.id,
     message: publicMessage,
   });
-  emitToUsers(conversationRecipients(row), "chat:conversation-updated", publicConversation(updatedRow));
+  await emitToUsers(await conversationRecipients(row), "chat:conversation-updated", publicConversation(updatedRow));
 
   return publicMessage;
 }
@@ -777,11 +811,11 @@ export function sendMessage(
  * from a static directory — a medical conversation's files must not be
  * reachable by anyone who guesses the stored filename.
  */
-export function getAttachment(user, messageId) {
-  const msg = db.prepare(`SELECT * FROM chat_messages WHERE id = ?`).get(Number(messageId));
+export async function getAttachment(user, messageId) {
+  const msg = await db.prepare(`SELECT * FROM chat_messages WHERE id = ?`).get(Number(messageId));
   if (!msg) throw ApiError.notFound("Message not found.");
 
-  const row = getConversationRow(msg.conversation_id);
+  const row = await getConversationRow(msg.conversation_id);
   requireParticipant(row, user);
 
   if (!msg.attachment_url) {
@@ -796,30 +830,30 @@ export function getAttachment(user, messageId) {
   };
 }
 
-export function markMessageRead(user, messageId) {
-  const msg = db.prepare(`SELECT * FROM chat_messages WHERE id = ?`).get(Number(messageId));
+export async function markMessageRead(user, messageId) {
+  const msg = await db.prepare(`SELECT * FROM chat_messages WHERE id = ?`).get(Number(messageId));
   if (!msg) throw ApiError.notFound("Message not found.");
 
-  const row = getConversationRow(msg.conversation_id);
+  const row = await getConversationRow(msg.conversation_id);
   requireParticipant(row, user);
 
   if (msg.sender_id !== user.id && !msg.is_read) {
-    db.prepare(
+    await db.prepare(
       `UPDATE chat_messages SET is_read = 1, updated_at = datetime('now') WHERE id = ?`
     ).run(msg.id);
 
-    emitToUsers(conversationRecipients(row), "chat:read", {
+    await emitToUsers(await conversationRecipients(row), "chat:read", {
       conversationId: row.id,
       messageId: msg.id,
       readerId: user.id,
     });
   }
 
-  const updated = db.prepare(`${SELECT_MESSAGE} WHERE m.id = ?`).get(msg.id);
+  const updated = await db.prepare(`${SELECT_MESSAGE} WHERE m.id = ?`).get(msg.id);
   return publicChatMessage(updated);
 }
 
-export function totalUnreadForUser(user) {
-  const conversations = listConversations(user);
+export async function totalUnreadForUser(user) {
+  const conversations = await listConversations(user);
   return conversations.reduce((sum, c) => sum + (c.unreadCount || 0), 0);
 }

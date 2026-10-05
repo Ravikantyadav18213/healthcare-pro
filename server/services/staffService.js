@@ -43,7 +43,7 @@ const STAFF_COLUMNS = `
  * the generic admin Users list (built for accounts in general) has
  * no room for.
  */
-export function listStaff({ search = "", role = "", departmentId = "" } = {}) {
+export async function listStaff({ search = "", role = "", departmentId = "" } = {}) {
   const where = [`u.role IN ('nurse','receptionist')`];
   const params = {};
 
@@ -62,7 +62,7 @@ export function listStaff({ search = "", role = "", departmentId = "" } = {}) {
     params.departmentId = Number(departmentId);
   }
 
-  return db
+  return await db
     .prepare(
       `SELECT ${STAFF_COLUMNS}
          FROM users u
@@ -74,8 +74,8 @@ export function listStaff({ search = "", role = "", departmentId = "" } = {}) {
     .all(params);
 }
 
-export function staffStats() {
-  const row = db
+export async function staffStats() {
+  const row = await db
     .prepare(
       `SELECT
          COUNT(*) AS total,
@@ -97,8 +97,8 @@ export function staffStats() {
   };
 }
 
-function getStaffOrThrow(id) {
-  const row = db
+async function getStaffOrThrow(id) {
+  const row = await db
     .prepare(
       `SELECT ${STAFF_COLUMNS}
          FROM users u
@@ -119,20 +119,20 @@ function getStaffOrThrow(id) {
  * admin-side equivalent of /auth/register, just for the two roles a
  * patient can never pick for themselves.
  */
-export function createStaff({ name, email, phone, password, role, departmentId }) {
+export async function createStaff({ name, email, phone, password, role, departmentId }) {
   if (!STAFF_ROLES.includes(role)) {
     throw ApiError.badRequest(`Role must be one of: ${STAFF_ROLES.join(", ")}.`);
   }
 
   const cleanEmail = String(email).trim().toLowerCase();
 
-  if (findByEmail.get(cleanEmail)) {
+  if (await findByEmail.get(cleanEmail)) {
     throw ApiError.conflict("An account with this email already exists.");
   }
 
   const passwordHash = bcrypt.hashSync(password, config.bcryptRounds);
 
-  const result = insertStaff.run({
+  const result = await insertStaff.run({
     name: String(name).trim(),
     email: cleanEmail,
     phone: phone ? String(phone).trim() : null,
@@ -141,53 +141,50 @@ export function createStaff({ name, email, phone, password, role, departmentId }
     department_id: departmentId ? Number(departmentId) : null,
   });
 
-  return getStaffOrThrow(result.lastInsertRowid);
+  return await getStaffOrThrow(result.lastInsertRowid);
 }
 
 /** Reassign which department a staff member covers, or unassign with null. */
-export function setStaffDepartment(id, departmentId) {
-  getStaffOrThrow(id);
+export async function setStaffDepartment(id, departmentId) {
+  await getStaffOrThrow(id);
 
-  db.prepare(`UPDATE users SET department_id = ?, updated_at = datetime('now') WHERE id = ?`).run(
-    departmentId ? Number(departmentId) : null,
-    Number(id)
-  );
+  await db
+    .prepare(`UPDATE users SET department_id = ?, updated_at = datetime('now') WHERE id = ?`)
+    .run(departmentId ? Number(departmentId) : null, Number(id));
 
-  return getStaffOrThrow(id);
+  return await getStaffOrThrow(id);
 }
 
 /** Reassign which ward a nurse is responsible for, or unassign with
     null (an unassigned nurse sees every ward). Receptionists have no
     ward — the front desk isn't attached to one. */
-export function setStaffWard(id, wardId) {
-  const staff = getStaffOrThrow(id);
+export async function setStaffWard(id, wardId) {
+  const staff = await getStaffOrThrow(id);
 
   if (staff.role !== "nurse") {
     throw ApiError.badRequest("Only nurses can be assigned to a ward.");
   }
 
-  db.prepare(`UPDATE users SET assigned_ward_id = ?, updated_at = datetime('now') WHERE id = ?`).run(
-    wardId ? Number(wardId) : null,
-    Number(id)
-  );
+  await db
+    .prepare(`UPDATE users SET assigned_ward_id = ?, updated_at = datetime('now') WHERE id = ?`)
+    .run(wardId ? Number(wardId) : null, Number(id));
 
-  return getStaffOrThrow(id);
+  return await getStaffOrThrow(id);
 }
 
 /** On Duty / Off Duty / On Leave — whether they're actually here right now. */
-export function setStaffDuty(id, dutyStatus) {
+export async function setStaffDuty(id, dutyStatus) {
   if (!DUTY_STATUSES.includes(dutyStatus)) {
     throw ApiError.badRequest(`Duty status must be one of: ${DUTY_STATUSES.join(", ")}.`);
   }
 
-  getStaffOrThrow(id);
+  await getStaffOrThrow(id);
 
-  db.prepare(`UPDATE users SET duty_status = ?, updated_at = datetime('now') WHERE id = ?`).run(
-    dutyStatus,
-    Number(id)
-  );
+  await db
+    .prepare(`UPDATE users SET duty_status = ?, updated_at = datetime('now') WHERE id = ?`)
+    .run(dutyStatus, Number(id));
 
-  return getStaffOrThrow(id);
+  return await getStaffOrThrow(id);
 }
 
 export default {

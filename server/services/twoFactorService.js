@@ -100,9 +100,9 @@ export async function beginChallenge(user) {
   const code = generateCode();
   const challenge = crypto.randomBytes(24).toString("hex");
 
-  voidPrevious.run(user.id);
+  await voidPrevious.run(user.id);
 
-  insertOtp.run({
+  await insertOtp.run({
     userId: user.id,
     codeHash: bcrypt.hashSync(code, 10),
     challenge,
@@ -134,12 +134,12 @@ export async function beginChallenge(user) {
  * already-used challenge, so a valid-looking response cannot be used
  * to distinguish "wrong code" from "wrong challenge".
  */
-export function verifyChallenge({ challenge, code }) {
+export async function verifyChallenge({ challenge, code }) {
   if (!challenge || !code) {
     throw ApiError.badRequest("Enter the code we emailed you.");
   }
 
-  const row = findByChallenge.get(String(challenge));
+  const row = await findByChallenge.get(String(challenge));
 
   if (!row) throw ApiError.unauthorized("That sign-in request has expired. Start again.");
 
@@ -148,22 +148,22 @@ export function verifyChallenge({ challenge, code }) {
   }
 
   if (row.attempts >= MAX_ATTEMPTS) {
-    consume.run(row.id);
+    await consume.run(row.id);
     throw ApiError.unauthorized("Too many incorrect codes. Start again.");
   }
 
   const expired =
-    db
+    (await db
       .prepare(`SELECT datetime('now') > ? AS expired`)
-      .get(row.expires_at)?.expired === 1;
+      .get(row.expires_at))?.expired === 1;
 
   if (expired) {
-    consume.run(row.id);
+    await consume.run(row.id);
     throw ApiError.unauthorized("That code has expired. Start again.");
   }
 
   if (!bcrypt.compareSync(String(code).trim(), row.code_hash)) {
-    bumpAttempts.run(row.id);
+    await bumpAttempts.run(row.id);
 
     const left = MAX_ATTEMPTS - (row.attempts + 1);
 
@@ -175,33 +175,33 @@ export function verifyChallenge({ challenge, code }) {
   }
 
   if (row.status !== "active") {
-    consume.run(row.id);
+    await consume.run(row.id);
     throw ApiError.forbidden("Your account has been deactivated.");
   }
 
-  consume.run(row.id);
+  await consume.run(row.id);
 
   return { userId: row.uid };
 }
 
 /** Turn the second factor on or off for one account. */
-export function setEnabled(userId, enabled) {
+export async function setEnabled(userId, enabled) {
   if (enabled && !mailerConfigured) {
     throw ApiError.badRequest(
       "Two-factor sign-in needs outgoing email to be configured on the server."
     );
   }
 
-  setFlag.run(enabled ? 1 : 0, userId);
+  await setFlag.run(enabled ? 1 : 0, userId);
 
   /* Switching it off should not leave a live challenge behind. */
-  if (!enabled) voidPrevious.run(userId);
+  if (!enabled) await voidPrevious.run(userId);
 
   return { twoFactorEnabled: Boolean(enabled) };
 }
 
-export function isEnabled(userId) {
-  const row = db
+export async function isEnabled(userId) {
+  const row = await db
     .prepare(`SELECT two_factor_enabled AS enabled FROM users WHERE id = ?`)
     .get(userId);
 

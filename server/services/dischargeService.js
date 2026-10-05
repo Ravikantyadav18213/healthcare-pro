@@ -50,22 +50,22 @@ const listStmt = db.prepare(`
   LIMIT @limit
 `);
 
-export function listSummaries({ patientId = null, limit = 100 } = {}) {
+export async function listSummaries({ patientId = null, limit = 100 } = {}) {
   return listStmt.all({
     patientId: patientId ? Number(patientId) : null,
     limit: Number(limit) || 100,
   });
 }
 
-export function getSummary(id) {
-  const row = getOne.get(id);
+export async function getSummary(id) {
+  const row = await getOne.get(id);
   if (!row) throw ApiError.notFound("Discharge summary not found.");
   return row;
 }
 
 /** Summaries a given patient login may read (their own only). */
-export function listForUser(userId) {
-  const patient = db
+export async function listForUser(userId) {
+  const patient = await db
     .prepare(`SELECT id FROM patients WHERE user_id = ?`)
     .get(userId);
 
@@ -74,7 +74,7 @@ export function listForUser(userId) {
   return listSummaries({ patientId: patient.id });
 }
 
-export const createSummary = db.transaction((payload) => {
+export const createSummary = db.transaction(async (payload) => {
   const {
     patientId,
     doctorId,
@@ -88,13 +88,13 @@ export const createSummary = db.transaction((payload) => {
     createdBy,
   } = payload;
 
-  const patient = db
+  const patient = await db
     .prepare(`SELECT id, bed_id AS bedId FROM patients WHERE id = ?`)
     .get(patientId);
 
   if (!patient) throw ApiError.notFound("Patient not found.");
 
-  const info = db
+  const info = await db
     .prepare(
       `INSERT INTO discharge_summaries
          (patient_id, doctor_id, admitted_on, discharged_on, diagnosis,
@@ -118,65 +118,71 @@ export const createSummary = db.transaction((payload) => {
       createdBy: createdBy ? Number(createdBy) : null,
     });
 
-  db.prepare(
-    `UPDATE patients
-        SET status = 'Discharged', bed_id = NULL, updated_at = datetime('now')
-      WHERE id = ?`
-  ).run(Number(patientId));
+  await db
+    .prepare(
+      `UPDATE patients
+          SET status = 'Discharged', bed_id = NULL, updated_at = datetime('now')
+        WHERE id = ?`
+    )
+    .run(Number(patientId));
 
   if (patient.bedId) {
-    db.prepare(
-      `UPDATE beds
-          SET status = 'available', patient_id = NULL, occupied_at = NULL,
-              updated_at = datetime('now')
-        WHERE id = ?`
-    ).run(patient.bedId);
+    await db
+      .prepare(
+        `UPDATE beds
+            SET status = 'available', patient_id = NULL, occupied_at = NULL,
+                updated_at = datetime('now')
+          WHERE id = ?`
+      )
+      .run(patient.bedId);
   }
 
   return getOne.get(info.lastInsertRowid);
 });
 
-export function updateSummary(id, payload) {
-  const existing = getOne.get(id);
+export async function updateSummary(id, payload) {
+  const existing = await getOne.get(id);
   if (!existing) throw ApiError.notFound("Discharge summary not found.");
 
-  db.prepare(
-    `UPDATE discharge_summaries
-        SET doctor_id              = @doctorId,
-            admitted_on            = @admittedOn,
-            discharged_on          = @dischargedOn,
-            diagnosis              = @diagnosis,
-            treatment_summary      = @treatmentSummary,
-            medications            = @medications,
-            follow_up_instructions = @followUpInstructions,
-            condition_on_discharge = @conditionOnDischarge,
-            updated_at             = datetime('now')
-      WHERE id = @id`
-  ).run({
-    id,
-    doctorId:
-      payload.doctorId === undefined
-        ? existing.doctorId
-        : payload.doctorId
-        ? Number(payload.doctorId)
-        : null,
-    admittedOn: payload.admittedOn ?? existing.admittedOn,
-    dischargedOn: payload.dischargedOn ?? existing.dischargedOn,
-    diagnosis: payload.diagnosis ?? existing.diagnosis,
-    treatmentSummary: payload.treatmentSummary ?? existing.treatmentSummary,
-    medications: payload.medications ?? existing.medications,
-    followUpInstructions: payload.followUpInstructions ?? existing.followUpInstructions,
-    conditionOnDischarge: payload.conditionOnDischarge ?? existing.conditionOnDischarge,
-  });
+  await db
+    .prepare(
+      `UPDATE discharge_summaries
+          SET doctor_id              = @doctorId,
+              admitted_on            = @admittedOn,
+              discharged_on          = @dischargedOn,
+              diagnosis              = @diagnosis,
+              treatment_summary      = @treatmentSummary,
+              medications            = @medications,
+              follow_up_instructions = @followUpInstructions,
+              condition_on_discharge = @conditionOnDischarge,
+              updated_at             = datetime('now')
+        WHERE id = @id`
+    )
+    .run({
+      id,
+      doctorId:
+        payload.doctorId === undefined
+          ? existing.doctorId
+          : payload.doctorId
+          ? Number(payload.doctorId)
+          : null,
+      admittedOn: payload.admittedOn ?? existing.admittedOn,
+      dischargedOn: payload.dischargedOn ?? existing.dischargedOn,
+      diagnosis: payload.diagnosis ?? existing.diagnosis,
+      treatmentSummary: payload.treatmentSummary ?? existing.treatmentSummary,
+      medications: payload.medications ?? existing.medications,
+      followUpInstructions: payload.followUpInstructions ?? existing.followUpInstructions,
+      conditionOnDischarge: payload.conditionOnDischarge ?? existing.conditionOnDischarge,
+    });
 
   return getOne.get(id);
 }
 
-export function removeSummary(id) {
-  const existing = getOne.get(id);
+export async function removeSummary(id) {
+  const existing = await getOne.get(id);
   if (!existing) throw ApiError.notFound("Discharge summary not found.");
 
-  db.prepare(`DELETE FROM discharge_summaries WHERE id = ?`).run(id);
+  await db.prepare(`DELETE FROM discharge_summaries WHERE id = ?`).run(id);
   return { id };
 }
 

@@ -1,24 +1,11 @@
 import ApiError from "../utils/ApiError.js";
+import { incr, pexpire, pttl, del } from "../utils/kv.js";
 
 /*
- * Small in-memory fixed-window limiter.
- *
- * Enough to blunt credential-stuffing against the auth endpoints in a
- * single-process deployment. Swap for Redis if this ever runs on more
- * than one node.
+ * Fixed-window limiter, backed by the shared kv store (server/utils/kv.js)
+ * so counts are correct across every serverless instance — see that
+ * file for why an in-memory Map alone isn't enough on Vercel.
  */
-
-const buckets = new Map();
-
-/* Housekeeping so the map cannot grow without bound. */
-const sweep = setInterval(() => {
-  const now = Date.now();
-  for (const [key, entry] of buckets) {
-    if (entry.resetAt <= now) buckets.delete(key);
-  }
-}, 60_000);
-
-sweep.unref?.();
 
 /*
  * The bucket key has to normalise the email EXACTLY the way the auth
@@ -52,25 +39,19 @@ export function rateLimit({
   message = "Too many attempts. Please try again in a few minutes.",
   keyBy = "ip-email",
 } = {}) {
-  return function limiter(req, res, next) {
+  return async function limiter(req, res, next) {
     const identifier = bucketKey(req, keyPrefix, keyBy);
 
-    const now = Date.now();
-    let entry = buckets.get(identifier);
+    const count = await incr(identifier);
+    if (count === 1) await pexpire(identifier, windowMs);
 
-    if (!entry || entry.resetAt <= now) {
-      entry = { count: 0, resetAt: now + windowMs };
-      buckets.set(identifier, entry);
-    }
-
-    entry.count += 1;
-
-    const remaining = Math.max(0, max - entry.count);
+    const remaining = Math.max(0, max - count);
     res.setHeader("X-RateLimit-Limit", String(max));
     res.setHeader("X-RateLimit-Remaining", String(remaining));
 
-    if (entry.count > max) {
-      const retryAfter = Math.ceil((entry.resetAt - now) / 1000);
+    if (count > max) {
+      const ttlMs = await pttl(identifier);
+      const retryAfter = Math.ceil((ttlMs > 0 ? ttlMs : windowMs) / 1000);
       res.setHeader("Retry-After", String(retryAfter));
       return next(ApiError.tooMany(message));
     }
@@ -80,6 +61,6 @@ export function rateLimit({
 }
 
 /** Clears the counter for a key prefix after a successful login. */
-export function resetRateLimit(req, keyPrefix = "rl") {
-  buckets.delete(bucketKey(req, keyPrefix));
+export async function resetRateLimit(req, keyPrefix = "rl") {
+  await del(bucketKey(req, keyPrefix));
 }

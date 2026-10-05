@@ -3,6 +3,10 @@ import { Router } from "express";
 import db from "../db.js";
 import { config } from "../config/env.js";
 import asyncHandler from "../utils/asyncHandler.js";
+import ApiError from "../utils/ApiError.js";
+import { authorizeChannel } from "../utils/realtime.js";
+import { runReminderSweep, runLowStockDigest } from "../services/reminderService.js";
+import { purgeOldSessions } from "../services/tokenService.js";
 
 import { requireAuth, optionalAuth } from "../middleware/auth.js";
 import {
@@ -43,6 +47,79 @@ router.get("/health", (_req, res) => {
   });
 });
 
+/* ==================================================================
+   REALTIME (Pusher channel auth)
+================================================================== */
+
+router.post(
+  "/realtime/auth",
+  requireAuth,
+  asyncHandler(async (req, res) => {
+    const socketId = req.body?.socket_id;
+    const channelName = req.body?.channel_name;
+
+    if (!socketId || !channelName) {
+      throw ApiError.badRequest("socket_id and channel_name are required.");
+    }
+
+    /* Raw shape pusher-js's authorizer expects — not the rest of this
+       API's { success, ... } envelope. */
+    res.json(authorizeChannel(socketId, channelName, req.user));
+  })
+);
+
+/* ==================================================================
+   CRON (scheduled jobs, no persistent server to run setInterval on)
+
+   Two callers, one secret:
+    - Vercel's own Cron Jobs send `Authorization: Bearer <CRON_SECRET>`
+      automatically whenever a CRON_SECRET env var exists on the
+      project — used for the daily job (Hobby plan cannot schedule
+      more often than once a day).
+    - The 15-minute appointment-reminder sweep is finer than that, so
+      it's triggered by a free external pinger (e.g. cron-job.org)
+      configured to send `x-cron-secret: <CRON_SECRET>` instead.
+
+   Both are no-ops (403) if CRON_SECRET was never set, so a deployment
+   that forgot to configure it fails closed rather than exposing an
+   unauthenticated trigger for hundreds of outbound emails/WhatsApp
+   messages.
+================================================================== */
+
+function requireCronSecret(req, _res, next) {
+  if (!config.cronSecret) {
+    return next(ApiError.notFound("Cron routes are not configured."));
+  }
+
+  const bearer = String(req.headers.authorization || "").replace(/^Bearer\s+/i, "");
+  const provided = req.headers["x-cron-secret"] || bearer;
+
+  if (provided !== config.cronSecret) {
+    return next(ApiError.forbidden("Invalid cron secret."));
+  }
+
+  return next();
+}
+
+router.post(
+  "/cron/reminders",
+  requireCronSecret,
+  asyncHandler(async (_req, res) => {
+    const results = await runReminderSweep();
+    res.json({ success: true, results });
+  })
+);
+
+router.get(
+  "/cron/daily",
+  requireCronSecret,
+  asyncHandler(async (_req, res) => {
+    const lowStock = await runLowStockDigest();
+    await purgeOldSessions();
+    res.json({ success: true, lowStock });
+  })
+);
+
 /*
  * Row counts describe the hospital's population, so this is an
  * administrator diagnostic rather than a public liveness probe.
@@ -53,21 +130,21 @@ router.get(
   requireAuth,
   requireAdmin,
   asyncHandler(async (_req, res) => {
-    const check = db.prepare("SELECT 1 AS ok").get();
+    const check = await db.prepare("SELECT 1 AS ok").get();
 
     const counts = {
-      users: db.prepare("SELECT COUNT(*) AS n FROM users").get().n,
-      doctors: db.prepare("SELECT COUNT(*) AS n FROM doctors").get().n,
-      departments: db.prepare("SELECT COUNT(*) AS n FROM departments").get().n,
-      patients: db.prepare("SELECT COUNT(*) AS n FROM patients").get().n,
-      appointments: db.prepare("SELECT COUNT(*) AS n FROM appointments").get().n,
-      reports: db.prepare("SELECT COUNT(*) AS n FROM reports").get().n,
+      users: (await db.prepare("SELECT COUNT(*) AS n FROM users").get()).n,
+      doctors: (await db.prepare("SELECT COUNT(*) AS n FROM doctors").get()).n,
+      departments: (await db.prepare("SELECT COUNT(*) AS n FROM departments").get()).n,
+      patients: (await db.prepare("SELECT COUNT(*) AS n FROM patients").get()).n,
+      appointments: (await db.prepare("SELECT COUNT(*) AS n FROM appointments").get()).n,
+      reports: (await db.prepare("SELECT COUNT(*) AS n FROM reports").get()).n,
     };
 
     res.json({
       success: true,
       status: check?.ok === 1 ? "connected" : "unknown",
-      driver: "better-sqlite3",
+      driver: "turso (libsql)",
       counts,
     });
   })
@@ -357,6 +434,7 @@ router.post(
 );
 router.get("/chat/messages/:id/attachment", requireAuth, chat.downloadAttachment);
 router.patch("/chat/messages/:id/read", requireAuth, chat.markMessageRead);
+router.post("/chat/conversations/:id/typing", requireAuth, chat.sendTyping);
 
 router.post("/chat/admin", requireAuth, chat.startAdminChat);
 

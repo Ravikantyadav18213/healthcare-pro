@@ -3,6 +3,7 @@ import jwt from "jsonwebtoken";
 
 import db from "../db.js";
 import { config } from "../config/env.js";
+import { setEx, exists } from "../utils/kv.js";
 
 const ACCESS_COOKIE = "hcp_access";
 const REFRESH_COOKIE = "hcp_refresh";
@@ -41,23 +42,19 @@ export function signAccessToken(user) {
 
    Access tokens live minutes, so a denylist of their ids stays tiny
    and needs no schema change; entries are dropped once the token
-   they refer to could no longer be accepted anyway. A restart clears
-   the list, which is safe: any token it held is closer to expiry than
-   when it was added, and the refresh session behind it is gone.
+   they refer to could no longer be accepted anyway. Kept in the
+   shared kv store (server/utils/kv.js, Redis in production) — an
+   in-memory Map only denylisted a token on whichever single instance
+   handled the logout, leaving it valid on every other serverless
+   instance for the rest of its (short) natural life.
 ================================================================== */
 
-const revokedJti = new Map();
-
-const revocationSweep = setInterval(() => {
-  const now = Date.now();
-  for (const [jti, expiresAt] of revokedJti) {
-    if (expiresAt <= now) revokedJti.delete(jti);
-  }
-}, 60_000);
-revocationSweep.unref?.();
+function revokedKey(jti) {
+  return `revoked-jti:${jti}`;
+}
 
 /** Blocks one already-issued access token for the remainder of its life. */
-export function revokeAccessToken(token) {
+export async function revokeAccessToken(token) {
   if (!token) return;
 
   try {
@@ -66,23 +63,26 @@ export function revokeAccessToken(token) {
     const payload = jwt.decode(token);
     if (!payload?.jti || !payload?.exp) return;
 
-    const expiresAt = payload.exp * 1000;
-    if (expiresAt > Date.now()) revokedJti.set(payload.jti, expiresAt);
+    const remainingSeconds = payload.exp - Math.floor(Date.now() / 1000);
+    if (remainingSeconds > 0) {
+      await setEx(revokedKey(payload.jti), "1", remainingSeconds);
+    }
   } catch {
     /* Unparseable token: nothing to revoke. */
   }
 }
 
-export function isAccessTokenRevoked(payload) {
-  return Boolean(payload?.jti && revokedJti.has(payload.jti));
+export async function isAccessTokenRevoked(payload) {
+  if (!payload?.jti) return false;
+  return exists(revokedKey(payload.jti));
 }
 
-export function verifyAccessToken(token) {
+export async function verifyAccessToken(token) {
   const payload = jwt.verify(token, config.jwtSecret);
   if (payload.typ !== "access") {
     throw new Error("Wrong token type.");
   }
-  if (isAccessTokenRevoked(payload)) {
+  if (await isAccessTokenRevoked(payload)) {
     throw new Error("Token revoked.");
   }
   return payload;
@@ -132,7 +132,7 @@ const purgeExpired = db.prepare(`
  * A non-persistent ("do not remember me") session is kept short in the
  * database as well, since its cookie dies with the browser anyway.
  */
-export function issueRefreshToken(
+export async function issueRefreshToken(
   userId,
   req,
   persistent = false,
@@ -147,7 +147,7 @@ export function issueRefreshToken(
     Date.now() + lifetimeDays * 24 * 60 * 60 * 1000
   ).toISOString();
 
-  insertSession.run(
+  await insertSession.run(
     userId,
     hashToken(raw),
     req?.get?.("user-agent") || null,
@@ -159,30 +159,30 @@ export function issueRefreshToken(
   return raw;
 }
 
-export function consumeRefreshToken(raw) {
+export async function consumeRefreshToken(raw) {
   if (!raw) return null;
 
-  const session = findSession.get(hashToken(raw));
+  const session = await findSession.get(hashToken(raw));
   if (!session) return null;
 
   /* Single-use rotation: the presented token is retired immediately. */
-  revokeSession.run(hashToken(raw));
+  await revokeSession.run(hashToken(raw));
 
   return session;
 }
 
-export function revokeRefreshToken(raw) {
+export async function revokeRefreshToken(raw) {
   if (!raw) return;
-  revokeSession.run(hashToken(raw));
+  await revokeSession.run(hashToken(raw));
 }
 
-export function revokeAllSessions(userId) {
-  revokeAllForUser.run(userId);
+export async function revokeAllSessions(userId) {
+  await revokeAllForUser.run(userId);
 }
 
-export function purgeOldSessions() {
+export async function purgeOldSessions() {
   try {
-    purgeExpired.run();
+    await purgeExpired.run();
   } catch {
     /* housekeeping only */
   }

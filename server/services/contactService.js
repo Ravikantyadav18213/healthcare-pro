@@ -77,9 +77,9 @@ export async function submitContactMessage({ name, email, message, ip }) {
   const insert = db.prepare(
     `INSERT INTO contact_messages (name, email, message, ip) VALUES (@name, @email, @message, @ip)`
   );
-  const result = insert.run({ name, email, message, ip: ip || null });
+  const result = await insert.run({ name, email, message, ip: ip || null });
 
-  const created = db
+  const created = await db
     .prepare(`SELECT * FROM contact_messages WHERE id = ?`)
     .get(result.lastInsertRowid);
 
@@ -94,7 +94,7 @@ export async function submitContactMessage({ name, email, message, ip }) {
   return { message: toCamel(created), emailed: mailResult.sent, mailError: mailResult.reason };
 }
 
-export function listContactMessages({ status = "" } = {}) {
+export async function listContactMessages({ status = "" } = {}) {
   const where = [];
   const params = {};
 
@@ -105,36 +105,39 @@ export function listContactMessages({ status = "" } = {}) {
 
   const clause = where.length ? `WHERE ${where.join(" AND ")}` : "";
 
-  return db
+  const rows = await db
     .prepare(`SELECT * FROM contact_messages ${clause} ORDER BY created_at DESC`)
-    .all(params)
-    .map(toCamel);
+    .all(params);
+
+  return rows.map(toCamel);
 }
 
-export function contactMessageStats() {
-  const total = db.prepare(`SELECT COUNT(*) AS n FROM contact_messages`).get().n;
-  const unread = db
-    .prepare(`SELECT COUNT(*) AS n FROM contact_messages WHERE status = 'unread'`)
-    .get().n;
+export async function contactMessageStats() {
+  const total = (await db.prepare(`SELECT COUNT(*) AS n FROM contact_messages`).get()).n;
+  const unread = (
+    await db
+      .prepare(`SELECT COUNT(*) AS n FROM contact_messages WHERE status = 'unread'`)
+      .get()
+  ).n;
 
   return { total, unread };
 }
 
-function getOrThrow(id) {
-  const row = db.prepare(`SELECT * FROM contact_messages WHERE id = ?`).get(Number(id));
+async function getOrThrow(id) {
+  const row = await db.prepare(`SELECT * FROM contact_messages WHERE id = ?`).get(Number(id));
   if (!row) throw ApiError.notFound("Contact message not found.");
   return row;
 }
 
-export function markContactMessageRead(id) {
-  getOrThrow(id);
-  db.prepare(`UPDATE contact_messages SET status = 'read' WHERE id = ?`).run(Number(id));
-  return toCamel(db.prepare(`SELECT * FROM contact_messages WHERE id = ?`).get(Number(id)));
+export async function markContactMessageRead(id) {
+  await getOrThrow(id);
+  await db.prepare(`UPDATE contact_messages SET status = 'read' WHERE id = ?`).run(Number(id));
+  return toCamel(await db.prepare(`SELECT * FROM contact_messages WHERE id = ?`).get(Number(id)));
 }
 
-export function deleteContactMessage(id) {
-  const row = getOrThrow(id);
-  db.prepare(`DELETE FROM contact_messages WHERE id = ?`).run(Number(id));
+export async function deleteContactMessage(id) {
+  const row = await getOrThrow(id);
+  await db.prepare(`DELETE FROM contact_messages WHERE id = ?`).run(Number(id));
   return toCamel(row);
 }
 
@@ -142,7 +145,7 @@ export function deleteContactMessage(id) {
     Marks the message read too — replying to something you have not
     read is not a state worth representing. */
 export async function replyToContactMessage(id, replyMessage) {
-  const row = getOrThrow(id);
+  const row = await getOrThrow(id);
 
   const { text, html } = replyEmail({
     name: row.name,
@@ -163,11 +166,11 @@ export async function replyToContactMessage(id, replyMessage) {
     );
   }
 
-  db.prepare(
+  await db.prepare(
     `UPDATE contact_messages
         SET reply_message = ?, replied_at = datetime('now'), status = 'read'
       WHERE id = ?`
   ).run(replyMessage, Number(id));
 
-  return toCamel(db.prepare(`SELECT * FROM contact_messages WHERE id = ?`).get(Number(id)));
+  return toCamel(await db.prepare(`SELECT * FROM contact_messages WHERE id = ?`).get(Number(id)));
 }

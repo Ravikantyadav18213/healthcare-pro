@@ -7,8 +7,16 @@ import axios from "axios";
    cookies issued by the API. No token is ever kept in localStorage.
 ================================================================== */
 
-export const API_URL =
-  import.meta.env.VITE_API_URL || "http://localhost:5000/api";
+/*
+ * VITE_API_URL is only needed when the frontend and API are on
+ * different origins — local dev (.env sets it to
+ * http://localhost:5000/api, since Vite's dev server and Express run
+ * on different ports) or a split deployment. On Vercel the frontend
+ * and API are the same origin/deployment (see vercel.json), so
+ * leaving VITE_API_URL unset there resolves to a same-origin relative
+ * path with no CORS or cross-site-cookie concerns at all.
+ */
+export const API_URL = import.meta.env.VITE_API_URL || "/api";
 
 const api = axios.create({
   baseURL: API_URL,

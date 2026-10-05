@@ -10,12 +10,14 @@ const insert = db.prepare(`
 /**
  * Record a meaningful action in the audit trail.
  * Never throws — auditing must not break the request it describes.
+ * Callers should `await` this: on serverless, an un-awaited write can
+ * be dropped when the function freezes right after the response.
  */
-export function audit(req, action, options = {}) {
+export async function audit(req, action, options = {}) {
   try {
     const actor = req?.user || null;
 
-    insert.run({
+    await insert.run({
       user_id: options.userId ?? actor?.id ?? null,
       actor_email: options.actorEmail ?? actor?.email ?? null,
       actor_role: options.actorRole ?? actor?.role ?? null,

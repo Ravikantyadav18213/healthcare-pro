@@ -1,13 +1,13 @@
 import db from "../db.js";
 import ApiError from "../utils/ApiError.js";
-import { emitToAdmins } from "../sockets/index.js";
+import { emitToAdmins } from "../utils/realtime.js";
 
 /* ==================================================================
    DEPARTMENTS
 ================================================================== */
 
-export function listDepartments({ includeInactive = false } = {}) {
-  const rows = db
+export async function listDepartments({ includeInactive = false } = {}) {
+  const rows = await db
     .prepare(
       `SELECT dep.*,
               (SELECT COUNT(*) FROM doctors d
@@ -31,13 +31,13 @@ export function listDepartments({ includeInactive = false } = {}) {
   }));
 }
 
-export function createDepartment(payload) {
+export async function createDepartment(payload) {
   const name = String(payload.name).trim();
 
-  const exists = db.prepare(`SELECT id FROM departments WHERE name = ?`).get(name);
+  const exists = await db.prepare(`SELECT id FROM departments WHERE name = ?`).get(name);
   if (exists) throw ApiError.conflict("A department with this name already exists.");
 
-  const result = db
+  const result = await db
     .prepare(
       `INSERT INTO departments (name, description, head_doctor) VALUES (?, ?, ?)`
     )
@@ -47,16 +47,15 @@ export function createDepartment(payload) {
       payload.headDoctor ? String(payload.headDoctor).trim() : null
     );
 
-  return listDepartments({ includeInactive: true }).find(
-    (dept) => dept.id === Number(result.lastInsertRowid)
-  );
+  const rows = await listDepartments({ includeInactive: true });
+  return rows.find((dept) => dept.id === Number(result.lastInsertRowid));
 }
 
-export function updateDepartment(id, payload) {
-  const existing = db.prepare(`SELECT * FROM departments WHERE id = ?`).get(Number(id));
+export async function updateDepartment(id, payload) {
+  const existing = await db.prepare(`SELECT * FROM departments WHERE id = ?`).get(Number(id));
   if (!existing) throw ApiError.notFound("Department not found.");
 
-  db.prepare(
+  await db.prepare(
     `UPDATE departments
         SET name = ?, description = ?, head_doctor = ?, status = ?,
             updated_at = datetime('now')
@@ -69,18 +68,18 @@ export function updateDepartment(id, payload) {
     Number(id)
   );
 
-  return listDepartments({ includeInactive: true }).find(
-    (dept) => dept.id === Number(id)
-  );
+  const rows = await listDepartments({ includeInactive: true });
+  return rows.find((dept) => dept.id === Number(id));
 }
 
-export function deleteDepartment(id) {
-  const existing = db.prepare(`SELECT * FROM departments WHERE id = ?`).get(Number(id));
+export async function deleteDepartment(id) {
+  const existing = await db.prepare(`SELECT * FROM departments WHERE id = ?`).get(Number(id));
   if (!existing) throw ApiError.notFound("Department not found.");
 
-  const doctors = db
+  const doctorsRow = await db
     .prepare(`SELECT COUNT(*) AS n FROM doctors WHERE department_id = ?`)
-    .get(Number(id)).n;
+    .get(Number(id));
+  const doctors = doctorsRow.n;
 
   if (doctors > 0) {
     throw ApiError.conflict(
@@ -88,7 +87,7 @@ export function deleteDepartment(id) {
     );
   }
 
-  db.prepare(`DELETE FROM departments WHERE id = ?`).run(Number(id));
+  await db.prepare(`DELETE FROM departments WHERE id = ?`).run(Number(id));
   return { id: Number(id), name: existing.name };
 }
 
@@ -108,7 +107,7 @@ const mapPharmacy = (row) => ({
   lowStock: row.stock <= 50,
 });
 
-export function listPharmacy({ search = "", category = "" } = {}) {
+export async function listPharmacy({ search = "", category = "" } = {}) {
   const where = [];
   const params = {};
 
@@ -122,18 +121,19 @@ export function listPharmacy({ search = "", category = "" } = {}) {
     params.category = category;
   }
 
-  return db
+  const rows = await db
     .prepare(
       `SELECT * FROM pharmacy_items
         ${where.length ? `WHERE ${where.join(" AND ")}` : ""}
         ORDER BY name COLLATE NOCASE`
     )
-    .all(params)
-    .map(mapPharmacy);
+    .all(params);
+
+  return rows.map(mapPharmacy);
 }
 
-export function createPharmacyItem(payload) {
-  const result = db
+export async function createPharmacyItem(payload) {
+  const result = await db
     .prepare(
       `INSERT INTO pharmacy_items
          (name, category, stock, unit_price, supplier, expiry_date)
@@ -148,24 +148,25 @@ export function createPharmacyItem(payload) {
       payload.expiry || null
     );
 
-  const created = mapPharmacy(
-    db.prepare(`SELECT * FROM pharmacy_items WHERE id = ?`).get(result.lastInsertRowid)
-  );
+  const createdRow = await db
+    .prepare(`SELECT * FROM pharmacy_items WHERE id = ?`)
+    .get(result.lastInsertRowid);
+  const created = mapPharmacy(createdRow);
 
   /* Moves the Pharmacy Stock tile on the dashboard. */
-  emitToAdmins("dashboard:stats-changed", { source: "pharmacy" });
+  await emitToAdmins("dashboard:stats-changed", { source: "pharmacy" });
 
   return created;
 }
 
-export function updatePharmacyItem(id, payload) {
-  const existing = db
+export async function updatePharmacyItem(id, payload) {
+  const existing = await db
     .prepare(`SELECT * FROM pharmacy_items WHERE id = ?`)
     .get(Number(id));
 
   if (!existing) throw ApiError.notFound("Pharmacy item not found.");
 
-  db.prepare(
+  await db.prepare(
     `UPDATE pharmacy_items
         SET name = ?, category = ?, stock = ?, unit_price = ?,
             supplier = ?, expiry_date = ?, updated_at = datetime('now')
@@ -180,25 +181,26 @@ export function updatePharmacyItem(id, payload) {
     Number(id)
   );
 
-  const updated = mapPharmacy(
-    db.prepare(`SELECT * FROM pharmacy_items WHERE id = ?`).get(Number(id))
-  );
+  const updatedRow = await db
+    .prepare(`SELECT * FROM pharmacy_items WHERE id = ?`)
+    .get(Number(id));
+  const updated = mapPharmacy(updatedRow);
 
-  emitToAdmins("dashboard:stats-changed", { source: "pharmacy" });
+  await emitToAdmins("dashboard:stats-changed", { source: "pharmacy" });
 
   return updated;
 }
 
-export function deletePharmacyItem(id) {
-  const existing = db
+export async function deletePharmacyItem(id) {
+  const existing = await db
     .prepare(`SELECT * FROM pharmacy_items WHERE id = ?`)
     .get(Number(id));
 
   if (!existing) throw ApiError.notFound("Pharmacy item not found.");
 
-  db.prepare(`DELETE FROM pharmacy_items WHERE id = ?`).run(Number(id));
+  await db.prepare(`DELETE FROM pharmacy_items WHERE id = ?`).run(Number(id));
 
-  emitToAdmins("dashboard:stats-changed", { source: "pharmacy" });
+  await emitToAdmins("dashboard:stats-changed", { source: "pharmacy" });
 
   return { id: Number(id), name: existing.name };
 }
@@ -219,7 +221,7 @@ const mapLab = (row) => ({
   result: row.result,
 });
 
-export function listLabTests({ search = "", status = "" } = {}) {
+export async function listLabTests({ search = "", status = "" } = {}) {
   const where = [];
   const params = {};
 
@@ -233,18 +235,19 @@ export function listLabTests({ search = "", status = "" } = {}) {
     params.status = status;
   }
 
-  return db
+  const rows = await db
     .prepare(
       `SELECT * FROM laboratory_tests
         ${where.length ? `WHERE ${where.join(" AND ")}` : ""}
         ORDER BY test_date DESC, id DESC`
     )
-    .all(params)
-    .map(mapLab);
+    .all(params);
+
+  return rows.map(mapLab);
 }
 
-export function createLabTest(payload) {
-  const result = db
+export async function createLabTest(payload) {
+  const result = await db
     .prepare(
       `INSERT INTO laboratory_tests
          (patient_id, patient_name, test_name, category, price, test_date, status, result)
@@ -261,19 +264,21 @@ export function createLabTest(payload) {
       payload.result || "Pending"
     );
 
-  return mapLab(
-    db.prepare(`SELECT * FROM laboratory_tests WHERE id = ?`).get(result.lastInsertRowid)
-  );
+  const row = await db
+    .prepare(`SELECT * FROM laboratory_tests WHERE id = ?`)
+    .get(result.lastInsertRowid);
+
+  return mapLab(row);
 }
 
-export function updateLabTest(id, payload) {
-  const existing = db
+export async function updateLabTest(id, payload) {
+  const existing = await db
     .prepare(`SELECT * FROM laboratory_tests WHERE id = ?`)
     .get(Number(id));
 
   if (!existing) throw ApiError.notFound("Laboratory test not found.");
 
-  db.prepare(
+  await db.prepare(
     `UPDATE laboratory_tests
         SET test_name = ?, category = ?, price = ?, test_date = ?,
             status = ?, result = ?, updated_at = datetime('now')
@@ -288,19 +293,21 @@ export function updateLabTest(id, payload) {
     Number(id)
   );
 
-  return mapLab(
-    db.prepare(`SELECT * FROM laboratory_tests WHERE id = ?`).get(Number(id))
-  );
+  const row = await db
+    .prepare(`SELECT * FROM laboratory_tests WHERE id = ?`)
+    .get(Number(id));
+
+  return mapLab(row);
 }
 
-export function deleteLabTest(id) {
-  const existing = db
+export async function deleteLabTest(id) {
+  const existing = await db
     .prepare(`SELECT * FROM laboratory_tests WHERE id = ?`)
     .get(Number(id));
 
   if (!existing) throw ApiError.notFound("Laboratory test not found.");
 
-  db.prepare(`DELETE FROM laboratory_tests WHERE id = ?`).run(Number(id));
+  await db.prepare(`DELETE FROM laboratory_tests WHERE id = ?`).run(Number(id));
   return { id: Number(id), name: existing.test_name };
 }
 
@@ -325,7 +332,7 @@ const mapBilling = (row) => ({
   collectedBy: row.collected_by_name || null,
 });
 
-export function listBilling({ search = "", status = "" } = {}) {
+export async function listBilling({ search = "", status = "" } = {}) {
   const where = [];
   const params = {};
 
@@ -339,7 +346,7 @@ export function listBilling({ search = "", status = "" } = {}) {
     params.status = status;
   }
 
-  const items = db
+  const itemRows = await db
     .prepare(
       `SELECT b.*, u.name AS collected_by_name
          FROM billing_records b
@@ -347,10 +354,11 @@ export function listBilling({ search = "", status = "" } = {}) {
         ${where.length ? `WHERE ${where.join(" AND ")}` : ""}
         ORDER BY b.issued_at DESC, b.id DESC`
     )
-    .all(params)
-    .map(mapBilling);
+    .all(params);
 
-  const totals = db
+  const items = itemRows.map(mapBilling);
+
+  const totals = await db
     .prepare(
       `SELECT COALESCE(SUM(CASE WHEN status = 'Paid'    THEN total ELSE 0 END), 0) AS collected,
               COALESCE(SUM(CASE WHEN status = 'Pending' THEN total ELSE 0 END), 0) AS outstanding,
@@ -362,18 +370,19 @@ export function listBilling({ search = "", status = "" } = {}) {
   return { items, totals };
 }
 
-export function createInvoice(payload) {
+export async function createInvoice(payload) {
   const amount = Number(payload.amount) || 0;
   const tax = Number(payload.gst) || 0;
   const discount = Number(payload.discount) || 0;
 
-  const next = db
+  const nextRow = await db
     .prepare(`SELECT COALESCE(MAX(id), 1041) AS last FROM billing_records`)
-    .get().last;
+    .get();
+  const next = nextRow.last;
 
   const invoiceNo = payload.invoiceNo || `INV-${Number(next) + 1}`;
 
-  const result = db
+  const result = await db
     .prepare(
       `INSERT INTO billing_records
          (invoice_no, patient_id, patient_name, amount, tax, discount,
@@ -394,14 +403,15 @@ export function createInvoice(payload) {
       payload.date || new Date().toISOString().slice(0, 10)
     );
 
-  const created = mapBilling(
-    db.prepare(`SELECT * FROM billing_records WHERE id = ?`).get(result.lastInsertRowid)
-  );
+  const createdRow = await db
+    .prepare(`SELECT * FROM billing_records WHERE id = ?`)
+    .get(result.lastInsertRowid);
+  const created = mapBilling(createdRow);
 
   /* Only moves Revenue Today when created straight into 'Paid', but
      that is a real path (payload.status), so check unconditionally
      is cheaper than the branch. */
-  emitToAdmins("dashboard:stats-changed", { source: "billing" });
+  await emitToAdmins("dashboard:stats-changed", { source: "billing" });
 
   return created;
 }
@@ -414,8 +424,8 @@ export function createInvoice(payload) {
  * financial record instead of fixing a draft. A wrong Paid invoice is
  * a refund/credit-note conversation, not a quick edit.
  */
-export function updateInvoice(id, payload) {
-  const existing = db.prepare(`SELECT * FROM billing_records WHERE id = ?`).get(Number(id));
+export async function updateInvoice(id, payload) {
+  const existing = await db.prepare(`SELECT * FROM billing_records WHERE id = ?`).get(Number(id));
   if (!existing) throw ApiError.notFound("Invoice not found.");
 
   if (existing.status !== "Pending") {
@@ -428,40 +438,42 @@ export function updateInvoice(id, payload) {
   const tax = Number(payload.gst) || 0;
   const discount = Number(payload.discount) || 0;
 
-  db.prepare(
+  await db.prepare(
     `UPDATE billing_records
         SET amount = ?, tax = ?, discount = ?, total = ?,
             insurance = ?, updated_at = datetime('now')
       WHERE id = ?`
   ).run(amount, tax, discount, amount + tax - discount, payload.insurance || "None", Number(id));
 
-  const updated = mapBilling(
-    db.prepare(`SELECT * FROM billing_records WHERE id = ?`).get(Number(id))
-  );
+  const updatedRow = await db
+    .prepare(`SELECT * FROM billing_records WHERE id = ?`)
+    .get(Number(id));
+  const updated = mapBilling(updatedRow);
 
-  emitToAdmins("dashboard:stats-changed", { source: "billing" });
+  await emitToAdmins("dashboard:stats-changed", { source: "billing" });
 
   return updated;
 }
 
-export function updateInvoiceStatus(id, status) {
-  const existing = db
+export async function updateInvoiceStatus(id, status) {
+  const existing = await db
     .prepare(`SELECT * FROM billing_records WHERE id = ?`)
     .get(Number(id));
 
   if (!existing) throw ApiError.notFound("Invoice not found.");
 
-  db.prepare(
+  await db.prepare(
     `UPDATE billing_records SET status = ?, updated_at = datetime('now') WHERE id = ?`
   ).run(status, Number(id));
 
-  const updated = mapBilling(
-    db.prepare(`SELECT * FROM billing_records WHERE id = ?`).get(Number(id))
-  );
+  const updatedRow = await db
+    .prepare(`SELECT * FROM billing_records WHERE id = ?`)
+    .get(Number(id));
+  const updated = mapBilling(updatedRow);
 
   /* This is the "Mark paid" action — the one that actually moves
      Revenue Today. */
-  emitToAdmins("dashboard:stats-changed", { source: "billing" });
+  await emitToAdmins("dashboard:stats-changed", { source: "billing" });
 
   return updated;
 }
@@ -482,8 +494,8 @@ const mapEmergency = (row) => ({
   notes: row.notes,
 });
 
-export function emergencyOverview() {
-  const cases = db
+export async function emergencyOverview() {
+  const caseRows = await db
     .prepare(
       `SELECT * FROM emergency_cases
         WHERE status != 'Discharged'
@@ -491,10 +503,11 @@ export function emergencyOverview() {
           CASE severity WHEN 'Critical' THEN 0 WHEN 'Serious' THEN 1 ELSE 2 END,
           arrived_at DESC`
     )
-    .all()
-    .map(mapEmergency);
+    .all();
 
-  const resources = db.prepare(`SELECT * FROM hospital_resources`).all();
+  const cases = caseRows.map(mapEmergency);
+
+  const resources = await db.prepare(`SELECT * FROM hospital_resources`).all();
 
   const ambulances = resources
     .filter((row) => row.kind === "ambulance")
@@ -516,8 +529,8 @@ export function emergencyOverview() {
   return { cases, ambulances, bloodBank, icuBeds: icu };
 }
 
-export function createEmergencyCase(payload) {
-  const result = db
+export async function createEmergencyCase(payload) {
+  const result = await db
     .prepare(
       `INSERT INTO emergency_cases
          (patient_name, phone, condition, severity, status, doctor_id, arrived_at, notes)
@@ -535,26 +548,27 @@ export function createEmergencyCase(payload) {
       payload.notes ? String(payload.notes).trim() : null
     );
 
-  const created = mapEmergency(
-    db.prepare(`SELECT * FROM emergency_cases WHERE id = ?`).get(result.lastInsertRowid)
-  );
+  const createdRow = await db
+    .prepare(`SELECT * FROM emergency_cases WHERE id = ?`)
+    .get(result.lastInsertRowid);
+  const created = mapEmergency(createdRow);
 
   /* A new case is usually 'Active', which moves the Emergency Cases
      tile on the dashboard — push it to any admin looking at it right
      now instead of waiting for them to switch tabs or hit refresh. */
-  emitToAdmins("dashboard:stats-changed", { source: "emergency", caseId: created.id });
+  await emitToAdmins("dashboard:stats-changed", { source: "emergency", caseId: created.id });
 
   return created;
 }
 
-export function updateEmergencyCase(id, payload) {
-  const existing = db
+export async function updateEmergencyCase(id, payload) {
+  const existing = await db
     .prepare(`SELECT * FROM emergency_cases WHERE id = ?`)
     .get(Number(id));
 
   if (!existing) throw ApiError.notFound("Emergency case not found.");
 
-  db.prepare(
+  await db.prepare(
     `UPDATE emergency_cases
         SET severity = ?, status = ?, notes = ?, updated_at = datetime('now')
       WHERE id = ?`
@@ -565,13 +579,14 @@ export function updateEmergencyCase(id, payload) {
     Number(id)
   );
 
-  const updated = mapEmergency(
-    db.prepare(`SELECT * FROM emergency_cases WHERE id = ?`).get(Number(id))
-  );
+  const updatedRow = await db
+    .prepare(`SELECT * FROM emergency_cases WHERE id = ?`)
+    .get(Number(id));
+  const updated = mapEmergency(updatedRow);
 
   /* Status change is exactly what moves both Emergency Cases and
      Discharged Today — e.g. Active -> Discharged. */
-  emitToAdmins("dashboard:stats-changed", { source: "emergency", caseId: updated.id });
+  await emitToAdmins("dashboard:stats-changed", { source: "emergency", caseId: updated.id });
 
   return updated;
 }
@@ -580,7 +595,7 @@ export function updateEmergencyCase(id, payload) {
    AUDIT
 ================================================================== */
 
-export function listAuditLogs({ search = "", action = "", limit = 100 } = {}) {
+export async function listAuditLogs({ search = "", action = "", limit = 100 } = {}) {
   const where = [];
   const params = { limit: Math.min(Number(limit) || 100, 500) };
 
@@ -594,24 +609,25 @@ export function listAuditLogs({ search = "", action = "", limit = 100 } = {}) {
     params.action = action;
   }
 
-  return db
+  const rows = await db
     .prepare(
       `SELECT * FROM audit_logs
         ${where.length ? `WHERE ${where.join(" AND ")}` : ""}
         ORDER BY created_at DESC, id DESC
         LIMIT @limit`
     )
-    .all(params)
-    .map((row) => ({
-      id: row.id,
-      userId: row.user_id,
-      actorEmail: row.actor_email,
-      actorRole: row.actor_role,
-      action: row.action,
-      entity: row.entity,
-      entityId: row.entity_id,
-      details: row.details,
-      ip: row.ip,
-      createdAt: row.created_at,
-    }));
+    .all(params);
+
+  return rows.map((row) => ({
+    id: row.id,
+    userId: row.user_id,
+    actorEmail: row.actor_email,
+    actorRole: row.actor_role,
+    action: row.action,
+    entity: row.entity,
+    entityId: row.entity_id,
+    details: row.details,
+    ip: row.ip,
+    createdAt: row.created_at,
+  }));
 }

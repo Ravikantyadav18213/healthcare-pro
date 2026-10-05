@@ -1,11 +1,10 @@
-import fs from "node:fs";
-import path from "node:path";
+import { Readable } from "node:stream";
 
 import asyncHandler from "../utils/asyncHandler.js";
 import audit from "../utils/audit.js";
 import ApiError from "../utils/ApiError.js";
-import { config } from "../config/env.js";
 import { chatMessageTypeFor } from "../middleware/upload.js";
+import { readFile } from "../utils/storage.js";
 import { validate, rules } from "../validators/index.js";
 import * as chat from "../services/chatService.js";
 
@@ -14,18 +13,18 @@ import * as chat from "../services/chatService.js";
 ================================================================== */
 
 export const listConversations = asyncHandler(async (req, res) => {
-  res.json({ success: true, items: chat.listConversations(req.user) });
+  res.json({ success: true, items: await chat.listConversations(req.user) });
 });
 
 export const getConversation = asyncHandler(async (req, res) => {
   res.json({
     success: true,
-    conversation: chat.getConversation(req.user, req.params.id),
+    conversation: await chat.getConversation(req.user, req.params.id),
   });
 });
 
 export const listMessages = asyncHandler(async (req, res) => {
-  const result = chat.listMessages(req.params.id, req.user, {
+  const result = await chat.listMessages(req.params.id, req.user, {
     page: req.query.page,
     limit: req.query.limit,
   });
@@ -39,12 +38,12 @@ export const sendMessage = asyncHandler(async (req, res) => {
     message: rules.string({ min: 0, max: 4000, label: "Message" }),
   });
 
-  const message = chat.sendMessage(req.user, req.params.id, {
+  const message = await chat.sendMessage(req.user, req.params.id, {
     message: req.body?.message,
     messageType: "text",
   });
 
-  audit(req, "message_sent", {
+  await audit(req, "message_sent", {
     entity: "chat_conversation",
     entityId: req.params.id,
     details: `Message sent in conversation #${req.params.id}.`,
@@ -64,7 +63,7 @@ export const sendMessage = asyncHandler(async (req, res) => {
  * to. sendMessage still re-checks; this does not replace it.
  */
 export const authorizeAttachment = asyncHandler(async (req, _res, next) => {
-  const row = chat.getConversationRow(req.params.id);
+  const row = await chat.getConversationRow(req.params.id);
 
   if (!row) {
     throw ApiError.notFound("Conversation not found.");
@@ -88,17 +87,17 @@ export const sendAttachment = asyncHandler(async (req, res) => {
 
   const messageType = chatMessageTypeFor(req.file.mimetype);
 
-  const message = chat.sendMessage(req.user, req.params.id, {
+  const message = await chat.sendMessage(req.user, req.params.id, {
     message: req.body?.message || "",
     messageType,
-    attachmentUrl: req.file.filename,
+    attachmentUrl: req.file.location,
     attachmentName: req.file.originalname,
     attachmentMime: String(req.file.mimetype || "").split(";")[0].trim(),
     attachmentSize: req.file.size,
     attachmentDuration: req.body?.duration ? Number(req.body.duration) : null,
   });
 
-  audit(req, "message_sent", {
+  await audit(req, "message_sent", {
     entity: "chat_conversation",
     entityId: req.params.id,
     details: `${messageType} attachment sent in conversation #${req.params.id}.`,
@@ -109,37 +108,49 @@ export const sendAttachment = asyncHandler(async (req, res) => {
 
 /** GET /api/chat/messages/:id/attachment — participants only. */
 export const downloadAttachment = asyncHandler(async (req, res) => {
-  const file = chat.getAttachment(req.user, req.params.id);
-  const absolute = path.join(config.uploadDir, file.storedName);
+  const file = await chat.getAttachment(req.user, req.params.id);
+  const stored = await readFile(file.storedName);
 
-  if (!fs.existsSync(absolute)) {
+  if (!stored) {
     throw ApiError.notFound("That attachment is no longer stored on the server.");
   }
 
   res.type(file.mimeType);
+  if (stored.contentLength) res.setHeader("Content-Length", stored.contentLength);
 
   /*
    * Images and voice notes are played in place; anything else is a
    * download, so the browser never renders an uploaded document
    * inline on the API origin.
    */
-  if (file.messageType === "image" || file.messageType === "audio") {
-    return res.sendFile(absolute);
+  if (file.messageType !== "image" && file.messageType !== "audio") {
+    res.setHeader(
+      "Content-Disposition",
+      `attachment; filename="${String(file.fileName || "attachment").replace(/"/g, "")}"`
+    );
   }
 
-  return res.download(absolute, file.fileName);
+  const nodeStream =
+    typeof stored.stream.pipe === "function" ? stored.stream : Readable.fromWeb(stored.stream);
+  nodeStream.pipe(res);
+});
+
+/** POST /api/chat/conversations/:id/typing — fire-and-forget, never errors. */
+export const sendTyping = asyncHandler(async (req, res) => {
+  await chat.relayTyping(req.user, req.params.id, req.body?.typing);
+  res.json({ success: true });
 });
 
 export const markMessageRead = asyncHandler(async (req, res) => {
-  const message = chat.markMessageRead(req.user, req.params.id);
+  const message = await chat.markMessageRead(req.user, req.params.id);
   res.json({ success: true, message });
 });
 
 /** POST /api/chat/admin — always allowed, never approval-gated. */
 export const startAdminChat = asyncHandler(async (req, res) => {
-  const conversation = chat.getOrCreateAdminConversation(req.user);
+  const conversation = await chat.getOrCreateAdminConversation(req.user);
 
-  audit(req, "conversation_created", {
+  await audit(req, "conversation_created", {
     entity: "chat_conversation",
     entityId: conversation.id,
     details: `${req.user.name} opened a conversation with the administrator.`,
@@ -158,14 +169,14 @@ export const createDoctorRequest = asyncHandler(async (req, res) => {
     reason: rules.string({ min: 3, max: 500, label: "Reason for contacting the doctor" }),
   });
 
-  const request = chat.createDoctorChatRequest(req.user, {
+  const request = await chat.createDoctorChatRequest(req.user, {
     doctorId: req.body.doctorId,
     appointmentId: req.body.appointmentId || null,
     reason: req.body.reason,
     initialMessage: req.body.initialMessage || null,
   });
 
-  audit(req, "doctor_chat_requested", {
+  await audit(req, "doctor_chat_requested", {
     entity: "chat_approval_request",
     entityId: request.id,
     details: `${req.user.name} requested to chat with ${request.doctorName}.`,
@@ -177,14 +188,14 @@ export const createDoctorRequest = asyncHandler(async (req, res) => {
 export const listDoctorRequests = asyncHandler(async (req, res) => {
   res.json({
     success: true,
-    items: chat.listDoctorRequests(req.user, req.query.status || "all"),
+    items: await chat.listDoctorRequests(req.user, req.query.status || "all"),
   });
 });
 
 export const approveDoctorRequest = asyncHandler(async (req, res) => {
-  const request = chat.approveDoctorRequest(req.user, req.params.id);
+  const request = await chat.approveDoctorRequest(req.user, req.params.id);
 
-  audit(req, "doctor_chat_approved", {
+  await audit(req, "doctor_chat_approved", {
     entity: "chat_approval_request",
     entityId: request.id,
     details: `Approved chat between ${request.patientName} and ${request.doctorName}.`,
@@ -198,9 +209,9 @@ export const rejectDoctorRequest = asyncHandler(async (req, res) => {
     rejectionReason: rules.string({ min: 0, max: 300, label: "Rejection reason" }),
   });
 
-  const request = chat.rejectDoctorRequest(req.user, req.params.id, req.body?.rejectionReason);
+  const request = await chat.rejectDoctorRequest(req.user, req.params.id, req.body?.rejectionReason);
 
-  audit(req, "doctor_chat_rejected", {
+  await audit(req, "doctor_chat_rejected", {
     entity: "chat_approval_request",
     entityId: request.id,
     details: `Rejected chat request between ${request.patientName} and ${request.doctorName}.`,
@@ -210,9 +221,9 @@ export const rejectDoctorRequest = asyncHandler(async (req, res) => {
 });
 
 export const revokeDoctorRequest = asyncHandler(async (req, res) => {
-  const request = chat.revokeDoctorRequest(req.user, req.params.id);
+  const request = await chat.revokeDoctorRequest(req.user, req.params.id);
 
-  audit(req, "doctor_chat_revoked", {
+  await audit(req, "doctor_chat_revoked", {
     entity: "chat_approval_request",
     entityId: request.id,
     details: `Revoked chat access between ${request.patientName} and ${request.doctorName}.`,

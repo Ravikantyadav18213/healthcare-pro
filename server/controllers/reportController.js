@@ -1,3 +1,5 @@
+import { Readable } from "node:stream";
+
 import asyncHandler from "../utils/asyncHandler.js";
 import audit from "../utils/audit.js";
 import { validate, rules } from "../validators/index.js";
@@ -11,13 +13,13 @@ import * as reports from "../services/reportService.js";
 export const listMine = asyncHandler(async (req, res) => {
   res.json({
     success: true,
-    reports: reports.listReports({
+    reports: await reports.listReports({
       userId: req.user.id,
       search: req.query.search || "",
       status: req.query.status || "",
       type: req.query.type || "",
     }),
-    stats: reports.reportStats(req.user.id),
+    stats: await reports.reportStats(req.user.id),
   });
 });
 
@@ -28,31 +30,37 @@ export const listMine = asyncHandler(async (req, res) => {
 export const listAll = asyncHandler(async (req, res) => {
   res.json({
     success: true,
-    reports: reports.listReports({
+    reports: await reports.listReports({
       search: req.query.search || "",
       status: req.query.status || "",
       type: req.query.type || "",
     }),
-    stats: reports.reportStats(),
+    stats: await reports.reportStats(),
   });
 });
 
 /* Ownership is enforced inside the service for both roles. */
 export const getOne = asyncHandler(async (req, res) => {
-  res.json({ success: true, report: reports.getReport(req.params.id, req.user) });
+  res.json({ success: true, report: await reports.getReport(req.params.id, req.user) });
 });
 
 export const download = asyncHandler(async (req, res) => {
-  const row = reports.getOwnedReport(req.params.id, req.user);
-  const absolute = reports.resolveReportFile(row);
+  const row = await reports.getOwnedReport(req.params.id, req.user);
+  const stored = await reports.resolveReportFile(row);
 
-  audit(req, "report_downloaded", {
+  await audit(req, "report_downloaded", {
     entity: "report",
     entityId: row.id,
     details: `Downloaded "${row.title}".`,
   });
 
-  res.download(absolute, row.file_name || `report-${row.id}`);
+  const filename = String(row.file_name || `report-${row.id}`).replace(/"/g, "");
+  res.setHeader("Content-Disposition", `attachment; filename="${filename}"`);
+  if (stored.contentLength) res.setHeader("Content-Length", stored.contentLength);
+
+  const nodeStream =
+    typeof stored.stream.pipe === "function" ? stored.stream : Readable.fromWeb(stored.stream);
+  nodeStream.pipe(res);
 });
 
 export const create = asyncHandler(async (req, res) => {
@@ -63,13 +71,13 @@ export const create = asyncHandler(async (req, res) => {
     reportDate: rules.date({ label: "Report date" }),
   });
 
-  const report = reports.createReport(
+  const report = await reports.createReport(
     req.user,
     req.body,
     describeUpload(req.file)
   );
 
-  audit(req, "report_created", {
+  await audit(req, "report_created", {
     entity: "report",
     entityId: report.id,
     details: `Created report "${report.title}" for user #${report.userId}.`,
@@ -83,9 +91,9 @@ export const update = asyncHandler(async (req, res) => {
     title: rules.string({ min: 3, max: 120, label: "Report title" }),
   });
 
-  const report = reports.updateReport(req.params.id, req.body);
+  const report = await reports.updateReport(req.params.id, req.body);
 
-  audit(req, "report_updated", {
+  await audit(req, "report_updated", {
     entity: "report",
     entityId: report.id,
     details: `Updated report "${report.title}".`,
@@ -95,9 +103,9 @@ export const update = asyncHandler(async (req, res) => {
 });
 
 export const remove = asyncHandler(async (req, res) => {
-  const removed = reports.deleteReport(req.params.id);
+  const removed = await reports.deleteReport(req.params.id);
 
-  audit(req, "report_deleted", {
+  await audit(req, "report_deleted", {
     entity: "report",
     entityId: removed.id,
     details: `Deleted report "${removed.title}".`,

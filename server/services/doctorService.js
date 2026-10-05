@@ -3,7 +3,7 @@ import ApiError from "../utils/ApiError.js";
 import { publicDoctor } from "../utils/sanitize.js";
 import { buildSlots, weekdayOf, isValidDate, today, nowTime } from "../utils/time.js";
 import { revokeAllSessions } from "./tokenService.js";
-import { emitToAdmins } from "../sockets/index.js";
+import { emitToAdmins } from "../utils/realtime.js";
 
 const SELECT_DOCTOR = `
   SELECT d.*, dep.name AS department_name
@@ -18,7 +18,7 @@ const findByEmail = db.prepare(`SELECT id FROM doctors WHERE email = ?`);
    LIST
 ================================================================== */
 
-export function listDoctors({
+export async function listDoctors({
   search = "",
   specialization = "",
   departmentId = null,
@@ -61,24 +61,26 @@ export function listDoctors({
     ORDER BY d.name COLLATE NOCASE ASC
   `;
 
-  return db.prepare(sql).all(params).map(publicDoctor);
+  const rows = await db.prepare(sql).all(params);
+  return rows.map(publicDoctor);
 }
 
-export function getDoctor(id) {
-  const row = findById.get(Number(id));
+export async function getDoctor(id) {
+  const row = await findById.get(Number(id));
   if (!row) throw ApiError.notFound("Doctor not found.");
   return publicDoctor(row);
 }
 
-export function listSpecializations() {
-  return db
+export async function listSpecializations() {
+  const rows = await db
     .prepare(
       `SELECT DISTINCT specialization FROM doctors
         WHERE status = 'active'
         ORDER BY specialization COLLATE NOCASE`
     )
-    .all()
-    .map((row) => row.specialization);
+    .all();
+
+  return rows.map((row) => row.specialization);
 }
 
 /* ==================================================================
@@ -121,29 +123,29 @@ function normalise(payload) {
   };
 }
 
-export function createDoctor(payload) {
+export async function createDoctor(payload) {
   const data = normalise(payload);
 
-  if (findByEmail.get(data.email)) {
+  if (await findByEmail.get(data.email)) {
     throw ApiError.conflict("A doctor with this email already exists.");
   }
 
   if (data.department_id) {
-    const dept = db
+    const dept = await db
       .prepare(`SELECT id FROM departments WHERE id = ?`)
       .get(data.department_id);
     if (!dept) throw ApiError.badRequest("Selected department does not exist.");
   }
 
-  const id = db.transaction(() => {
-    const result = insertDoctor.run(data);
+  const id = await db.transaction(async () => {
+    const result = await insertDoctor.run(data);
     const doctorId = result.lastInsertRowid;
 
     /* Give the new doctor a standard Mon–Sat schedule so they are
        immediately bookable. */
     for (let weekday = 1; weekday <= 6; weekday += 1) {
       for (const window of DEFAULT_WINDOWS) {
-        insertWindow.run(doctorId, weekday, window.start, window.end);
+        await insertWindow.run(doctorId, weekday, window.start, window.end);
       }
     }
 
@@ -151,18 +153,18 @@ export function createDoctor(payload) {
   })();
 
   /* Moves the Total Doctors tile on the dashboard. */
-  emitToAdmins("dashboard:stats-changed", { source: "doctors" });
+  await emitToAdmins("dashboard:stats-changed", { source: "doctors" });
 
-  return publicDoctor(findById.get(id));
+  return publicDoctor(await findById.get(id));
 }
 
-export function updateDoctor(id, payload) {
-  const existing = findById.get(Number(id));
+export async function updateDoctor(id, payload) {
+  const existing = await findById.get(Number(id));
   if (!existing) throw ApiError.notFound("Doctor not found.");
 
   const data = normalise(payload);
 
-  const duplicate = db
+  const duplicate = await db
     .prepare(`SELECT id FROM doctors WHERE email = ? AND id != ?`)
     .get(data.email, Number(id));
 
@@ -170,7 +172,7 @@ export function updateDoctor(id, payload) {
     throw ApiError.conflict("Another doctor already uses this email.");
   }
 
-  db.prepare(
+  await db.prepare(
     `UPDATE doctors
         SET name = @name, email = @email, phone = @phone,
             specialization = @specialization, department_id = @department_id,
@@ -181,7 +183,7 @@ export function updateDoctor(id, payload) {
       WHERE id = @id`
   ).run({ ...data, id: Number(id) });
 
-  return publicDoctor(findById.get(Number(id)));
+  return publicDoctor(await findById.get(Number(id)));
 }
 
 /*
@@ -193,12 +195,12 @@ export function updateDoctor(id, payload) {
  * /api/doctor/* route kept serving other people's patient records.
  * An administrator reasonably reads "deactivate" as "cut access".
  */
-function syncDoctorLoginStatus(doctorRow, status) {
+async function syncDoctorLoginStatus(doctorRow, status) {
   if (!doctorRow?.user_id) return;
 
   const accountStatus = status === "active" ? "active" : "inactive";
 
-  db.prepare(
+  await db.prepare(
     `UPDATE users SET status = ?, updated_at = datetime('now') WHERE id = ?`
   ).run(accountStatus, doctorRow.user_id);
 
@@ -206,39 +208,41 @@ function syncDoctorLoginStatus(doctorRow, status) {
      the refresh session would still be sitting there — end it now so
      the sign-out is immediate rather than merely eventual. */
   if (accountStatus === "inactive") {
-    revokeAllSessions(doctorRow.user_id);
+    await revokeAllSessions(doctorRow.user_id);
   }
 }
 
-export function setDoctorStatus(id, status) {
-  const existing = findById.get(Number(id));
+export async function setDoctorStatus(id, status) {
+  const existing = await findById.get(Number(id));
   if (!existing) throw ApiError.notFound("Doctor not found.");
 
-  db.transaction(() => {
-    db.prepare(
+  await db.transaction(async () => {
+    await db.prepare(
       `UPDATE doctors SET status = ?, updated_at = datetime('now') WHERE id = ?`
     ).run(status, Number(id));
 
-    syncDoctorLoginStatus(existing, status);
+    await syncDoctorLoginStatus(existing, status);
   })();
 
   /* active/inactive toggles the Total Doctors count. */
-  emitToAdmins("dashboard:stats-changed", { source: "doctors" });
+  await emitToAdmins("dashboard:stats-changed", { source: "doctors" });
 
-  return publicDoctor(findById.get(Number(id)));
+  return publicDoctor(await findById.get(Number(id)));
 }
 
-export function deleteDoctor(id) {
-  const existing = findById.get(Number(id));
+export async function deleteDoctor(id) {
+  const existing = await findById.get(Number(id));
   if (!existing) throw ApiError.notFound("Doctor not found.");
 
-  const liveAppointments = db
-    .prepare(
-      `SELECT COUNT(*) AS n FROM appointments
-        WHERE doctor_id = ?
-          AND status IN ('pending','scheduled','confirmed','rescheduled')`
-    )
-    .get(Number(id)).n;
+  const liveAppointments = (
+    await db
+      .prepare(
+        `SELECT COUNT(*) AS n FROM appointments
+          WHERE doctor_id = ?
+            AND status IN ('pending','scheduled','confirmed','rescheduled')`
+      )
+      .get(Number(id))
+  ).n;
 
   if (liveAppointments > 0) {
     throw ApiError.conflict(
@@ -246,16 +250,16 @@ export function deleteDoctor(id) {
     );
   }
 
-  db.transaction(() => {
+  await db.transaction(async () => {
     /* doctors.user_id is ON DELETE SET NULL, so removing the profile
        would otherwise leave a still-active role='doctor' login with no
        profile behind it — able to sign in, and refused by the portal
        with a confusing 403 rather than being properly closed. */
-    syncDoctorLoginStatus(existing, "inactive");
-    db.prepare(`DELETE FROM doctors WHERE id = ?`).run(Number(id));
+    await syncDoctorLoginStatus(existing, "inactive");
+    await db.prepare(`DELETE FROM doctors WHERE id = ?`).run(Number(id));
   })();
 
-  emitToAdmins("dashboard:stats-changed", { source: "doctors" });
+  await emitToAdmins("dashboard:stats-changed", { source: "doctors" });
 
   return { id: Number(id), name: existing.name };
 }
@@ -264,7 +268,7 @@ export function deleteDoctor(id) {
    AVAILABILITY
 ================================================================== */
 
-export function getDoctorSchedule(doctorId) {
+export async function getDoctorSchedule(doctorId) {
   return db
     .prepare(
       `SELECT weekday, start_time, end_time
@@ -275,17 +279,17 @@ export function getDoctorSchedule(doctorId) {
     .all(Number(doctorId));
 }
 
-export function replaceDoctorSchedule(doctorId, windows) {
-  const existing = findById.get(Number(doctorId));
+export async function replaceDoctorSchedule(doctorId, windows) {
+  const existing = await findById.get(Number(doctorId));
   if (!existing) throw ApiError.notFound("Doctor not found.");
 
-  db.transaction(() => {
-    db.prepare(`DELETE FROM doctor_availability WHERE doctor_id = ?`).run(
+  await db.transaction(async () => {
+    await db.prepare(`DELETE FROM doctor_availability WHERE doctor_id = ?`).run(
       Number(doctorId)
     );
 
     for (const window of windows) {
-      insertWindow.run(
+      await insertWindow.run(
         Number(doctorId),
         Number(window.weekday),
         window.startTime,
@@ -302,12 +306,12 @@ export function replaceDoctorSchedule(doctorId, windows) {
  * working windows expanded into slots, minus slots already held by
  * a live appointment, minus times that have already passed today.
  */
-export function getAvailableSlots(doctorId, date) {
+export async function getAvailableSlots(doctorId, date) {
   if (!isValidDate(date)) {
     throw ApiError.badRequest("Provide a valid date in YYYY-MM-DD format.");
   }
 
-  const doctor = findById.get(Number(doctorId));
+  const doctor = await findById.get(Number(doctorId));
   if (!doctor) throw ApiError.notFound("Doctor not found.");
 
   if (doctor.status !== "active") {
@@ -320,7 +324,7 @@ export function getAvailableSlots(doctorId, date) {
 
   const weekday = weekdayOf(date);
 
-  const windows = db
+  const windows = await db
     .prepare(
       `SELECT start_time, end_time FROM doctor_availability
         WHERE doctor_id = ? AND weekday = ?
@@ -332,16 +336,15 @@ export function getAvailableSlots(doctorId, date) {
     return { date, slots: [], reason: "The doctor does not hold clinic on this day." };
   }
 
-  const taken = new Set(
-    db
-      .prepare(
-        `SELECT appointment_time FROM appointments
-          WHERE doctor_id = ? AND appointment_date = ?
-            AND status IN ('pending','scheduled','confirmed','rescheduled')`
-      )
-      .all(Number(doctorId), date)
-      .map((row) => row.appointment_time)
-  );
+  const takenRows = await db
+    .prepare(
+      `SELECT appointment_time FROM appointments
+        WHERE doctor_id = ? AND appointment_date = ?
+          AND status IN ('pending','scheduled','confirmed','rescheduled')`
+    )
+    .all(Number(doctorId), date);
+
+  const taken = new Set(takenRows.map((row) => row.appointment_time));
 
   const isToday = date === today();
   const currentTime = nowTime();
@@ -369,13 +372,13 @@ export function getAvailableSlots(doctorId, date) {
 }
 
 /** Confirms a requested slot actually exists in the doctor's schedule. */
-export function isSlotWithinSchedule(doctorId, date, time) {
-  const doctor = findById.get(Number(doctorId));
+export async function isSlotWithinSchedule(doctorId, date, time) {
+  const doctor = await findById.get(Number(doctorId));
   if (!doctor) return false;
 
   const weekday = weekdayOf(date);
 
-  const windows = db
+  const windows = await db
     .prepare(
       `SELECT start_time, end_time FROM doctor_availability
         WHERE doctor_id = ? AND weekday = ?`

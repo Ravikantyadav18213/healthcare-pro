@@ -13,7 +13,7 @@ const findUser = db.prepare(
  * fresh database read — never from anything the client sent in the
  * body, query string, or a custom header.
  */
-export function requireAuth(req, _res, next) {
+export async function requireAuth(req, _res, next) {
   const token = readAccessToken(req);
 
   if (!token) {
@@ -22,7 +22,7 @@ export function requireAuth(req, _res, next) {
 
   let payload;
   try {
-    payload = verifyAccessToken(token);
+    payload = await verifyAccessToken(token);
   } catch (error) {
     const expired = error?.name === "TokenExpiredError";
     return next(
@@ -32,7 +32,7 @@ export function requireAuth(req, _res, next) {
     );
   }
 
-  const user = findUser.get(payload.sub);
+  const user = await findUser.get(payload.sub);
 
   if (!user) {
     return next(ApiError.unauthorized("Account no longer exists."));
@@ -49,13 +49,13 @@ export function requireAuth(req, _res, next) {
 }
 
 /** Attaches req.user when a valid token exists, but never rejects. */
-export function optionalAuth(req, _res, next) {
+export async function optionalAuth(req, _res, next) {
   const token = readAccessToken(req);
   if (!token) return next();
 
   try {
-    const payload = verifyAccessToken(token);
-    const user = findUser.get(payload.sub);
+    const payload = await verifyAccessToken(token);
+    const user = await findUser.get(payload.sub);
     if (user && user.status === "active") req.user = user;
   } catch {
     /* anonymous request */

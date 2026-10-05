@@ -1,11 +1,8 @@
-import fs from "node:fs";
-import path from "node:path";
-
 import db from "../db.js";
-import { config } from "../config/env.js";
 import ApiError from "../utils/ApiError.js";
 import notify from "../utils/notify.js";
 import { publicReport } from "../utils/sanitize.js";
+import { deleteFile, readFile } from "../utils/storage.js";
 
 const SELECT_REPORT = `
   SELECT r.*,
@@ -19,7 +16,7 @@ const SELECT_REPORT = `
 
 const findById = db.prepare(`${SELECT_REPORT} WHERE r.id = ?`);
 
-export function listReports({ userId = null, search = "", status = "", type = "" } = {}) {
+export async function listReports({ userId = null, search = "", status = "", type = "" } = {}) {
   const where = [];
   const params = {};
 
@@ -53,15 +50,16 @@ export function listReports({ userId = null, search = "", status = "", type = ""
     ORDER BY r.report_date DESC, r.id DESC
   `;
 
-  return db.prepare(sql).all(params).map(publicReport);
+  const rows = await db.prepare(sql).all(params);
+  return rows.map(publicReport);
 }
 
 /**
  * Fetches a report and enforces ownership.
  * A user asking for someone else's report gets 403, never the row.
  */
-export function getOwnedReport(id, user) {
-  const row = findById.get(Number(id));
+export async function getOwnedReport(id, user) {
+  const row = await findById.get(Number(id));
   if (!row) throw ApiError.notFound("Report not found.");
 
   if (user.role !== "admin" && row.user_id !== user.id) {
@@ -71,26 +69,26 @@ export function getOwnedReport(id, user) {
   return row;
 }
 
-export function getReport(id, user) {
-  return publicReport(getOwnedReport(id, user));
+export async function getReport(id, user) {
+  return publicReport(await getOwnedReport(id, user));
 }
 
-export function createReport(actor, payload, file = null) {
+export async function createReport(actor, payload, file = null) {
   const userId = Number(payload.userId);
 
-  const owner = db.prepare(`SELECT id, name FROM users WHERE id = ?`).get(userId);
+  const owner = await db.prepare(`SELECT id, name FROM users WHERE id = ?`).get(userId);
   if (!owner) throw ApiError.validation({ userId: "Select a valid patient account." });
 
   let patientId = payload.patientId ? Number(payload.patientId) : null;
 
   if (!patientId) {
-    const profile = db
+    const profile = await db
       .prepare(`SELECT id FROM patients WHERE user_id = ? ORDER BY id LIMIT 1`)
       .get(userId);
     patientId = profile?.id ?? null;
   }
 
-  const result = db
+  const result = await db
     .prepare(
       `INSERT INTO reports
          (user_id, patient_id, title, type, description, result, status,
@@ -115,21 +113,21 @@ export function createReport(actor, payload, file = null) {
       created_by: actor.id,
     });
 
-  notify(userId, {
+  await notify(userId, {
     title: "New report available",
     message: `"${String(payload.title).trim()}" has been added to your records.`,
     type: "info",
     link: "/my-reports",
   });
 
-  return publicReport(findById.get(result.lastInsertRowid));
+  return publicReport(await findById.get(result.lastInsertRowid));
 }
 
-export function updateReport(id, payload) {
-  const existing = findById.get(Number(id));
+export async function updateReport(id, payload) {
+  const existing = await findById.get(Number(id));
   if (!existing) throw ApiError.notFound("Report not found.");
 
-  db.prepare(
+  await db.prepare(
     `UPDATE reports
         SET title = @title, type = @type, description = @description,
             result = @result, status = @status, report_date = @report_date,
@@ -145,50 +143,40 @@ export function updateReport(id, payload) {
     report_date: payload.reportDate || existing.report_date,
   });
 
-  return publicReport(findById.get(Number(id)));
+  return publicReport(await findById.get(Number(id)));
 }
 
-export function deleteReport(id) {
-  const existing = findById.get(Number(id));
+export async function deleteReport(id) {
+  const existing = await findById.get(Number(id));
   if (!existing) throw ApiError.notFound("Report not found.");
 
   if (existing.file_path) {
-    const absolute = path.join(config.uploadDir, existing.file_path);
-    /* Guard against any stored value trying to escape the upload dir. */
-    if (absolute.startsWith(path.resolve(config.uploadDir))) {
-      fs.promises.unlink(absolute).catch(() => {});
-    }
+    await deleteFile(existing.file_path);
   }
 
-  db.prepare(`DELETE FROM reports WHERE id = ?`).run(Number(id));
+  await db.prepare(`DELETE FROM reports WHERE id = ?`).run(Number(id));
   return { id: Number(id), title: existing.title };
 }
 
-/** Resolves the on-disk path for a download, with a traversal guard. */
-export function resolveReportFile(row) {
+/** Reads the stored file back for a download, wherever it lives. */
+export async function resolveReportFile(row) {
   if (!row.file_path) {
     throw ApiError.notFound("This report does not have an attached file.");
   }
 
-  const base = path.resolve(config.uploadDir);
-  const absolute = path.resolve(base, row.file_path);
-
-  if (!absolute.startsWith(base + path.sep) && absolute !== base) {
-    throw ApiError.forbidden("Invalid file reference.");
-  }
-
-  if (!fs.existsSync(absolute)) {
+  const stored = await readFile(row.file_path);
+  if (!stored) {
     throw ApiError.notFound("The stored file could not be located.");
   }
 
-  return absolute;
+  return stored;
 }
 
-export function reportStats(userId = null) {
+export async function reportStats(userId = null) {
   const scope = userId ? "WHERE user_id = @userId" : "";
   const params = userId ? { userId: Number(userId) } : {};
 
-  const row = db
+  const row = await db
     .prepare(
       `SELECT COUNT(*) AS total,
               SUM(CASE WHEN status = 'Completed' THEN 1 ELSE 0 END) AS completed,

@@ -36,14 +36,14 @@ const userById = db.prepare(`SELECT id, name FROM users WHERE id = ?`);
  * what id they ask for — the requested id is ignored for that role
  * rather than compared, so there is no way to probe other rows.
  */
-export function resolvePatientScope(requester, requestedPatientId) {
+export async function resolvePatientScope(requester, requestedPatientId) {
   if (requester.role === "user") {
-    const record = patientByUser.get(requester.id);
+    const record = await patientByUser.get(requester.id);
 
     return {
       patientId: record?.id ?? null,
       userId: requester.id,
-      name: record?.name || userById.get(requester.id)?.name || "You",
+      name: record?.name || (await userById.get(requester.id))?.name || "You",
     };
   }
 
@@ -54,7 +54,7 @@ export function resolvePatientScope(requester, requestedPatientId) {
     throw ApiError.badRequest("A patient id is required.");
   }
 
-  const record = patientById.get(id);
+  const record = await patientById.get(id);
 
   if (!record) throw ApiError.notFound("Patient not found.");
 
@@ -182,7 +182,7 @@ function dayAt(date, time) {
  *
  * `kinds` optionally narrows which sources are included.
  */
-export function buildTimeline({ patientId, userId }, { kinds } = {}) {
+export async function buildTimeline({ patientId, userId }, { kinds } = {}) {
   const wanted = Array.isArray(kinds) && kinds.length ? new Set(kinds) : null;
   const include = (kind) => !wanted || wanted.has(kind);
 
@@ -190,7 +190,7 @@ export function buildTimeline({ patientId, userId }, { kinds } = {}) {
   const events = [];
 
   if (include("appointment")) {
-    for (const row of appointmentRows.all(params)) {
+    for (const row of await appointmentRows.all(params)) {
       events.push({
         kind: "appointment",
         id: row.id,
@@ -209,7 +209,7 @@ export function buildTimeline({ patientId, userId }, { kinds } = {}) {
   }
 
   if (patientId && include("diagnosis")) {
-    for (const row of historyRows.all(patientId)) {
+    for (const row of await historyRows.all(patientId)) {
       events.push({
         kind: "diagnosis",
         id: row.id,
@@ -228,7 +228,7 @@ export function buildTimeline({ patientId, userId }, { kinds } = {}) {
   }
 
   if (patientId && include("prescription")) {
-    for (const row of prescriptionRows.all(patientId)) {
+    for (const row of await prescriptionRows.all(patientId)) {
       events.push({
         kind: "prescription",
         id: row.id,
@@ -247,7 +247,7 @@ export function buildTimeline({ patientId, userId }, { kinds } = {}) {
   }
 
   if (include("report")) {
-    for (const row of reportRows.all(params)) {
+    for (const row of await reportRows.all(params)) {
       events.push({
         kind: "report",
         id: row.id,
@@ -264,7 +264,7 @@ export function buildTimeline({ patientId, userId }, { kinds } = {}) {
   }
 
   if (patientId && include("lab")) {
-    for (const row of labRows.all(patientId)) {
+    for (const row of await labRows.all(patientId)) {
       events.push({
         kind: "lab",
         id: row.id,
@@ -282,7 +282,7 @@ export function buildTimeline({ patientId, userId }, { kinds } = {}) {
   }
 
   if (include("billing")) {
-    for (const row of billingRows.all(params)) {
+    for (const row of await billingRows.all(params)) {
       events.push({
         kind: "billing",
         id: row.id,
@@ -295,7 +295,7 @@ export function buildTimeline({ patientId, userId }, { kinds } = {}) {
   }
 
   if (patientId && include("discharge")) {
-    for (const row of dischargeRows.all(patientId)) {
+    for (const row of await dischargeRows.all(patientId)) {
       events.push({
         kind: "discharge",
         id: row.id,

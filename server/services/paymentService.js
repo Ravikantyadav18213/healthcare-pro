@@ -4,7 +4,7 @@ import db from "../db.js";
 import ApiError from "../utils/ApiError.js";
 import { config } from "../config/env.js";
 import { notify, notifyAdmins } from "../utils/notify.js";
-import { emitToAdmins } from "../sockets/index.js";
+import { emitToAdmins } from "../utils/realtime.js";
 
 /* ==================================================================
    ONLINE PAYMENTS (Razorpay)
@@ -76,8 +76,8 @@ function assertMayPay(invoice, user) {
   }
 }
 
-export function getInvoiceOrThrow(id) {
-  const invoice = findInvoice.get(Number(id));
+export async function getInvoiceOrThrow(id) {
+  const invoice = await findInvoice.get(Number(id));
   if (!invoice) throw ApiError.notFound("Invoice not found.");
   return invoice;
 }
@@ -96,7 +96,7 @@ export async function createOrder(invoiceId, user) {
     );
   }
 
-  const invoice = getInvoiceOrThrow(invoiceId);
+  const invoice = await getInvoiceOrThrow(invoiceId);
   assertMayPay(invoice, user);
 
   if (invoice.status === "Paid") {
@@ -139,7 +139,7 @@ export async function createOrder(invoiceId, user) {
     );
   }
 
-  saveOrder.run(data.id, invoice.id);
+  await saveOrder.run(data.id, invoice.id);
 
   return {
     orderId: data.id,
@@ -170,7 +170,7 @@ export async function createOrder(invoiceId, user) {
  * this endpoint: without it, any caller could POST arbitrary ids and
  * have an invoice marked paid.
  */
-export function verifyPayment({ invoiceId, orderId, paymentId, signature }, user) {
+export async function verifyPayment({ invoiceId, orderId, paymentId, signature }, user) {
   if (!paymentsConfigured) {
     throw ApiError.badRequest("Online payments are not configured on this server.");
   }
@@ -179,7 +179,7 @@ export function verifyPayment({ invoiceId, orderId, paymentId, signature }, user
     throw ApiError.badRequest("Incomplete payment confirmation.");
   }
 
-  const invoice = getInvoiceOrThrow(invoiceId);
+  const invoice = await getInvoiceOrThrow(invoiceId);
   assertMayPay(invoice, user);
 
   /* The order must be the one this server created for this invoice —
@@ -209,13 +209,13 @@ export function verifyPayment({ invoiceId, orderId, paymentId, signature }, user
   /* Already settled by an earlier confirmation of the same payment —
      a double-click, or a retried request. Not an error. */
   if (invoice.status === "Paid" && invoice.paymentId === paymentId) {
-    return { invoice: getInvoiceOrThrow(invoiceId), alreadyPaid: true };
+    return { invoice: await getInvoiceOrThrow(invoiceId), alreadyPaid: true };
   }
 
-  markPaid.run(paymentId, invoice.id);
+  await markPaid.run(paymentId, invoice.id);
 
   if (invoice.userId) {
-    notify(invoice.userId, {
+    await notify(invoice.userId, {
       title: "Payment received",
       message: `Invoice ${invoice.invoiceNo} is paid. Thank you.`,
       type: "success",
@@ -223,7 +223,7 @@ export function verifyPayment({ invoiceId, orderId, paymentId, signature }, user
     });
   }
 
-  notifyAdmins({
+  await notifyAdmins({
     title: "Invoice paid online",
     message: `${invoice.patientName} paid ${invoice.invoiceNo} (₹${Number(invoice.total).toLocaleString("en-IN")}).`,
     type: "success",
@@ -233,9 +233,9 @@ export function verifyPayment({ invoiceId, orderId, paymentId, signature }, user
   /* Revenue Today and the Reports charts read live off this event —
      without it they only catch up on their next poll or manual
      refresh, which reads as the payment "not showing up yet". */
-  emitToAdmins("dashboard:stats-changed", { source: "billing" });
+  await emitToAdmins("dashboard:stats-changed", { source: "billing" });
 
-  return { invoice: getInvoiceOrThrow(invoiceId), alreadyPaid: false };
+  return { invoice: await getInvoiceOrThrow(invoiceId), alreadyPaid: false };
 }
 
 const COUNTER_METHODS = ["Cash", "Card", "UPI"];
@@ -257,12 +257,12 @@ const markPaidAtCounter = db.prepare(`
  * method, and which staff member recorded it, so a "we didn't
  * actually collect that" dispute has an answer.
  */
-export function recordCounterPayment(invoiceId, method, staffUser) {
+export async function recordCounterPayment(invoiceId, method, staffUser) {
   if (!COUNTER_METHODS.includes(method)) {
     throw ApiError.badRequest(`Method must be one of: ${COUNTER_METHODS.join(", ")}.`);
   }
 
-  const invoice = getInvoiceOrThrow(invoiceId);
+  const invoice = await getInvoiceOrThrow(invoiceId);
 
   if (invoice.status === "Paid") {
     throw ApiError.conflict("That invoice is already paid.");
@@ -272,10 +272,10 @@ export function recordCounterPayment(invoiceId, method, staffUser) {
     throw ApiError.conflict("That invoice was cancelled.");
   }
 
-  markPaidAtCounter.run(method, staffUser.id, invoice.id);
+  await markPaidAtCounter.run(method, staffUser.id, invoice.id);
 
   if (invoice.userId) {
-    notify(invoice.userId, {
+    await notify(invoice.userId, {
       title: "Payment received",
       message: `Invoice ${invoice.invoiceNo} is paid (${method} at the hospital). Thank you.`,
       type: "success",
@@ -283,7 +283,7 @@ export function recordCounterPayment(invoiceId, method, staffUser) {
     });
   }
 
-  emitToAdmins("dashboard:stats-changed", { source: "billing" });
+  await emitToAdmins("dashboard:stats-changed", { source: "billing" });
 
   return getInvoiceOrThrow(invoiceId);
 }

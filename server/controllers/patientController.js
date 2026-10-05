@@ -8,20 +8,21 @@ import * as patients from "../services/patientService.js";
 ================================================================== */
 
 export const list = asyncHandler(async (req, res) => {
-  res.json({
-    success: true,
-    patients: patients.listPatients({
+  const [rows, stats] = await Promise.all([
+    patients.listPatients({
       search: req.query.search || "",
       departmentId: req.query.departmentId || null,
       status: req.query.status || "",
       limit: req.query.limit || null,
     }),
-    stats: patients.patientStats(),
-  });
+    patients.patientStats(),
+  ]);
+
+  res.json({ success: true, patients: rows, stats });
 });
 
 export const getOne = asyncHandler(async (req, res) => {
-  res.json({ success: true, patient: patients.getPatient(req.params.id) });
+  res.json({ success: true, patient: await patients.getPatient(req.params.id) });
 });
 
 const patientSchema = {
@@ -33,9 +34,9 @@ const patientSchema = {
 export const create = asyncHandler(async (req, res) => {
   validate(req.body || {}, patientSchema);
 
-  const patient = patients.createPatient(req.body);
+  const patient = await patients.createPatient(req.body);
 
-  audit(req, "patient_created", {
+  await audit(req, "patient_created", {
     entity: "patient",
     entityId: patient.id,
     details: `Added patient ${patient.name}.`,
@@ -47,9 +48,9 @@ export const create = asyncHandler(async (req, res) => {
 export const update = asyncHandler(async (req, res) => {
   validate(req.body || {}, patientSchema);
 
-  const patient = patients.updatePatient(req.params.id, req.body);
+  const patient = await patients.updatePatient(req.params.id, req.body);
 
-  audit(req, "patient_updated", {
+  await audit(req, "patient_updated", {
     entity: "patient",
     entityId: patient.id,
     details: `Updated patient ${patient.name}.`,
@@ -59,9 +60,9 @@ export const update = asyncHandler(async (req, res) => {
 });
 
 export const remove = asyncHandler(async (req, res) => {
-  const removed = patients.deletePatient(req.params.id);
+  const removed = await patients.deletePatient(req.params.id);
 
-  audit(req, "patient_deleted", {
+  await audit(req, "patient_deleted", {
     entity: "patient",
     entityId: removed.id,
     details: `Deleted patient ${removed.name}.`,
@@ -78,7 +79,7 @@ export const remove = asyncHandler(async (req, res) => {
 ================================================================== */
 
 export const getMine = asyncHandler(async (req, res) => {
-  res.json({ success: true, patient: patients.getOwnPatient(req.user.id) });
+  res.json({ success: true, patient: await patients.getOwnPatient(req.user.id) });
 });
 
 export const updateMine = asyncHandler(async (req, res) => {
@@ -87,9 +88,9 @@ export const updateMine = asyncHandler(async (req, res) => {
     dateOfBirth: rules.date({ required: false, label: "Date of birth" }),
   });
 
-  const patient = patients.updateOwnPatient(req.user.id, req.body);
+  const patient = await patients.updateOwnPatient(req.user.id, req.body);
 
-  audit(req, "patient_updated", {
+  await audit(req, "patient_updated", {
     entity: "patient",
     entityId: patient.id,
     details: "User updated their own medical profile.",

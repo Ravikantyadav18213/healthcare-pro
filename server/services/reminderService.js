@@ -181,7 +181,7 @@ async function sweepLeadTime(hours) {
   const upperMinutes = hours * 60;
   const lowerMinutes = Math.max(upperMinutes - bandMinutes, 0);
 
-  const appointments = dueAppointments.all(
+  const appointments = await dueAppointments.all(
     ...REMINDABLE,
     `+${lowerMinutes} minutes`,
     `+${upperMinutes} minutes`
@@ -192,10 +192,10 @@ async function sweepLeadTime(hours) {
 
   for (const appointment of appointments) {
     /* In-app always — it costs nothing and works with no provider. */
-    if (!alreadySent.get(appointment.id, "inapp", label)) {
-      recordReminder.run(appointment.id, "inapp", label, "sent", null);
+    if (!(await alreadySent.get(appointment.id, "inapp", label))) {
+      await recordReminder.run(appointment.id, "inapp", label, "sent", null);
 
-      notify(appointment.userId, {
+      await notify(appointment.userId, {
         title: "Appointment reminder",
         message: `${appointment.doctorName} — ${formatWhen(appointment.date, appointment.time)}`,
         type: "info",
@@ -205,9 +205,13 @@ async function sweepLeadTime(hours) {
       sent += 1;
     }
 
-    if (mailerConfigured && appointment.patientEmail && !alreadySent.get(appointment.id, "email", label)) {
+    if (
+      mailerConfigured &&
+      appointment.patientEmail &&
+      !(await alreadySent.get(appointment.id, "email", label))
+    ) {
       /* Recorded first: a crash mid-send must not re-send later. */
-      recordReminder.run(appointment.id, "email", label, "sent", null);
+      await recordReminder.run(appointment.id, "email", label, "sent", null);
 
       const result = await sendMail({
         to: appointment.patientEmail,
@@ -217,14 +221,18 @@ async function sweepLeadTime(hours) {
       });
 
       if (!result.sent) {
-        markReminder.run("failed", result.reason || null, appointment.id, "email", label);
+        await markReminder.run("failed", result.reason || null, appointment.id, "email", label);
       } else {
         sent += 1;
       }
     }
 
-    if (whatsappConfigured && appointment.patientPhone && !alreadySent.get(appointment.id, "whatsapp", label)) {
-      recordReminder.run(appointment.id, "whatsapp", label, "sent", null);
+    if (
+      whatsappConfigured &&
+      appointment.patientPhone &&
+      !(await alreadySent.get(appointment.id, "whatsapp", label))
+    ) {
+      await recordReminder.run(appointment.id, "whatsapp", label, "sent", null);
 
       /* The Twilio sandbox accepts one message every three seconds and
          rejects the rest, so a clinic-sized batch would lose everything
@@ -240,7 +248,7 @@ async function sweepLeadTime(hours) {
       });
 
       if (!result.sent) {
-        markReminder.run("failed", result.reason || null, appointment.id, "whatsapp", label);
+        await markReminder.run("failed", result.reason || null, appointment.id, "whatsapp", label);
       } else {
         sent += 1;
       }
@@ -294,15 +302,16 @@ export async function runLowStockDigest({ force = false } = {}) {
 
   const today = new Date().toISOString().slice(0, 10);
 
-  if (!force && readMeta.get("low_stock_digest_date")?.value === today) {
+  const lastDigest = await readMeta.get("low_stock_digest_date");
+  if (!force && lastDigest?.value === today) {
     return { skipped: "already sent today" };
   }
 
-  const items = lowStockItems.all(config.lowStockThreshold);
+  const items = await lowStockItems.all(config.lowStockThreshold);
 
   /* Nothing low is still a successful run — stamp the day so a later
      dip does not fire a second digest. */
-  writeMeta.run("low_stock_digest_date", today);
+  await writeMeta.run("low_stock_digest_date", today);
 
   if (items.length === 0) return { items: 0 };
 
@@ -351,7 +360,7 @@ export async function runLowStockDigest({ force = false } = {}) {
     </p>
   </div>`;
 
-  notifyAdmins({
+  await notifyAdmins({
     title: "Pharmacy low on stock",
     message: `${items.length} item${items.length === 1 ? " is" : "s are"} at or below ${config.lowStockThreshold} units.`,
     type: "warning",
@@ -359,7 +368,7 @@ export async function runLowStockDigest({ force = false } = {}) {
   });
 
   if (mailerConfigured) {
-    for (const admin of activeAdmins.all()) {
+    for (const admin of await activeAdmins.all()) {
       if (!admin.email) continue;
 
       await sendMail({

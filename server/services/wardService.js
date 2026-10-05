@@ -64,11 +64,11 @@ const getPatient = db.prepare(`SELECT id, name FROM patients WHERE id = ?`);
 /* A nurse with an assigned ward only ever sees that one ward — the
    caller passes it in, we don't ask "which ward do you want" for
    someone who isn't allowed to answer "any of them". */
-export function listWards({ assignedWardId = null } = {}) {
+export async function listWards({ assignedWardId = null } = {}) {
   return listWardsStmt.all({ wardId: assignedWardId ? Number(assignedWardId) : null });
 }
 
-export function listBeds({ wardId = null, status = null, assignedWardId = null } = {}) {
+export async function listBeds({ wardId = null, status = null, assignedWardId = null } = {}) {
   const effectiveWardId = assignedWardId ? Number(assignedWardId) : wardId ? Number(wardId) : null;
 
   return listBedsStmt.all({
@@ -77,10 +77,10 @@ export function listBeds({ wardId = null, status = null, assignedWardId = null }
   });
 }
 
-export function wardStats({ assignedWardId = null } = {}) {
+export async function wardStats({ assignedWardId = null } = {}) {
   const wardId = assignedWardId ? Number(assignedWardId) : null;
 
-  const row = db
+  const row = await db
     .prepare(
       `SELECT
          COUNT(*)                                                AS totalBeds,
@@ -93,9 +93,11 @@ export function wardStats({ assignedWardId = null } = {}) {
     )
     .get({ wardId });
 
-  const wards = db
-    .prepare(`SELECT COUNT(*) AS c FROM wards WHERE (@wardId IS NULL OR id = @wardId)`)
-    .get({ wardId }).c;
+  const wards = (
+    await db
+      .prepare(`SELECT COUNT(*) AS c FROM wards WHERE (@wardId IS NULL OR id = @wardId)`)
+      .get({ wardId })
+  ).c;
 
   const totalBeds = row.totalBeds || 0;
 
@@ -112,14 +114,14 @@ export function wardStats({ assignedWardId = null } = {}) {
 
 /* ---------------------------------------------------------------- */
 
-export function createWard({ name, kind, floor, departmentId, notes }) {
-  const exists = db
+export async function createWard({ name, kind, floor, departmentId, notes }) {
+  const exists = await db
     .prepare(`SELECT id FROM wards WHERE name = ? COLLATE NOCASE`)
     .get(name);
 
   if (exists) throw ApiError.conflict("A ward with that name already exists.");
 
-  const info = db
+  const info = await db
     .prepare(
       `INSERT INTO wards (name, kind, floor, department_id, notes)
        VALUES (@name, @kind, @floor, @departmentId, @notes)`
@@ -135,44 +137,48 @@ export function createWard({ name, kind, floor, departmentId, notes }) {
   return getWard.get(info.lastInsertRowid);
 }
 
-export function updateWard(id, { name, kind, floor, departmentId, notes }) {
-  const ward = getWard.get(id);
+export async function updateWard(id, { name, kind, floor, departmentId, notes }) {
+  const ward = await getWard.get(id);
   if (!ward) throw ApiError.notFound("Ward not found.");
 
   if (name && name !== ward.name) {
-    const clash = db
+    const clash = await db
       .prepare(`SELECT id FROM wards WHERE name = ? COLLATE NOCASE AND id <> ?`)
       .get(name, id);
 
     if (clash) throw ApiError.conflict("A ward with that name already exists.");
   }
 
-  db.prepare(
-    `UPDATE wards
-        SET name = @name, kind = @kind, floor = @floor,
-            department_id = @departmentId, notes = @notes,
-            updated_at = datetime('now')
-      WHERE id = @id`
-  ).run({
-    id,
-    name: name ?? ward.name,
-    kind: kind ?? ward.kind,
-    floor: floor ?? ward.floor,
-    departmentId:
-      departmentId === undefined ? ward.department_id : departmentId ? Number(departmentId) : null,
-    notes: notes ?? ward.notes,
-  });
+  await db
+    .prepare(
+      `UPDATE wards
+          SET name = @name, kind = @kind, floor = @floor,
+              department_id = @departmentId, notes = @notes,
+              updated_at = datetime('now')
+        WHERE id = @id`
+    )
+    .run({
+      id,
+      name: name ?? ward.name,
+      kind: kind ?? ward.kind,
+      floor: floor ?? ward.floor,
+      departmentId:
+        departmentId === undefined ? ward.department_id : departmentId ? Number(departmentId) : null,
+      notes: notes ?? ward.notes,
+    });
 
   return getWard.get(id);
 }
 
-export function removeWard(id) {
-  const ward = getWard.get(id);
+export async function removeWard(id) {
+  const ward = await getWard.get(id);
   if (!ward) throw ApiError.notFound("Ward not found.");
 
-  const occupied = db
-    .prepare(`SELECT COUNT(*) AS c FROM beds WHERE ward_id = ? AND status = 'occupied'`)
-    .get(id).c;
+  const occupied = (
+    await db
+      .prepare(`SELECT COUNT(*) AS c FROM beds WHERE ward_id = ? AND status = 'occupied'`)
+      .get(id)
+  ).c;
 
   /* Deleting the ward would cascade its beds away and silently strand
      the patients lying in them. */
@@ -182,23 +188,23 @@ export function removeWard(id) {
     );
   }
 
-  db.prepare(`DELETE FROM wards WHERE id = ?`).run(id);
+  await db.prepare(`DELETE FROM wards WHERE id = ?`).run(id);
   return { id };
 }
 
 /* ---------------------------------------------------------------- */
 
-export function createBed({ wardId, label, status, notes }) {
-  const ward = getWard.get(wardId);
+export async function createBed({ wardId, label, status, notes }) {
+  const ward = await getWard.get(wardId);
   if (!ward) throw ApiError.notFound("Ward not found.");
 
-  const clash = db
+  const clash = await db
     .prepare(`SELECT id FROM beds WHERE ward_id = ? AND label = ? COLLATE NOCASE`)
     .get(wardId, label);
 
   if (clash) throw ApiError.conflict(`Bed "${label}" already exists in this ward.`);
 
-  const info = db
+  const info = await db
     .prepare(
       `INSERT INTO beds (ward_id, label, status, notes)
        VALUES (@wardId, @label, @status, @notes)`
@@ -219,8 +225,8 @@ export function createBed({ wardId, label, status, notes }) {
  * Labels that already exist are skipped rather than failing the whole
  * batch — re-running to top a ward up is the normal case.
  */
-export function createBedRange({ wardId, prefix = "Bed", from, to }) {
-  const ward = getWard.get(wardId);
+export async function createBedRange({ wardId, prefix = "Bed", from, to }) {
+  const ward = await getWard.get(wardId);
   if (!ward) throw ApiError.notFound("Ward not found.");
 
   const start = Number(from);
@@ -238,24 +244,24 @@ export function createBedRange({ wardId, prefix = "Bed", from, to }) {
     `INSERT OR IGNORE INTO beds (ward_id, label, status) VALUES (?, ?, 'available')`
   );
 
-  const run = db.transaction(() => {
+  const run = db.transaction(async () => {
     let added = 0;
 
     for (let n = start; n <= end; n += 1) {
-      const info = insert.run(Number(wardId), `${prefix} ${n}`.trim());
+      const info = await insert.run(Number(wardId), `${prefix} ${n}`.trim());
       if (info.changes) added += 1;
     }
 
     return added;
   });
 
-  const added = run();
+  const added = await run();
 
   return { added, skipped: end - start + 1 - added };
 }
 
-export function updateBed(id, { label, status, notes }) {
-  const bed = getBed.get(id);
+export async function updateBed(id, { label, status, notes }) {
+  const bed = await getBed.get(id);
   if (!bed) throw ApiError.notFound("Bed not found.");
 
   /* Marking an occupied bed as anything else without going through
@@ -267,30 +273,32 @@ export function updateBed(id, { label, status, notes }) {
     );
   }
 
-  db.prepare(
-    `UPDATE beds
-        SET label = @label, status = @status, notes = @notes,
-            updated_at = datetime('now')
-      WHERE id = @id`
-  ).run({
-    id,
-    label: label ?? bed.label,
-    status: status ?? bed.status,
-    notes: notes ?? bed.notes,
-  });
+  await db
+    .prepare(
+      `UPDATE beds
+          SET label = @label, status = @status, notes = @notes,
+              updated_at = datetime('now')
+        WHERE id = @id`
+    )
+    .run({
+      id,
+      label: label ?? bed.label,
+      status: status ?? bed.status,
+      notes: notes ?? bed.notes,
+    });
 
   return getBed.get(id);
 }
 
-export function removeBed(id) {
-  const bed = getBed.get(id);
+export async function removeBed(id) {
+  const bed = await getBed.get(id);
   if (!bed) throw ApiError.notFound("Bed not found.");
 
   if (bed.status === "occupied") {
     throw ApiError.conflict("This bed is occupied. Release the patient first.");
   }
 
-  db.prepare(`DELETE FROM beds WHERE id = ?`).run(id);
+  await db.prepare(`DELETE FROM beds WHERE id = ?`).run(id);
   return { id };
 }
 
@@ -303,8 +311,8 @@ export function removeBed(id) {
  * the patient already held is released first — a patient occupying
  * two beds at once is not a state the board can render honestly.
  */
-export const assignBed = db.transaction(({ bedId, patientId }) => {
-  const bed = getBed.get(bedId);
+export const assignBed = db.transaction(async ({ bedId, patientId }) => {
+  const bed = await getBed.get(bedId);
   if (!bed) throw ApiError.notFound("Bed not found.");
 
   if (bed.status === "occupied" && bed.patient_id !== Number(patientId)) {
@@ -315,46 +323,56 @@ export const assignBed = db.transaction(({ bedId, patientId }) => {
     throw ApiError.conflict("That bed is out of service.");
   }
 
-  const patient = getPatient.get(patientId);
+  const patient = await getPatient.get(patientId);
   if (!patient) throw ApiError.notFound("Patient not found.");
 
-  db.prepare(
-    `UPDATE beds
-        SET status = 'available', patient_id = NULL, occupied_at = NULL,
-            updated_at = datetime('now')
-      WHERE patient_id = ? AND id <> ?`
-  ).run(Number(patientId), Number(bedId));
+  await db
+    .prepare(
+      `UPDATE beds
+          SET status = 'available', patient_id = NULL, occupied_at = NULL,
+              updated_at = datetime('now')
+        WHERE patient_id = ? AND id <> ?`
+    )
+    .run(Number(patientId), Number(bedId));
 
-  db.prepare(
-    `UPDATE beds
-        SET status = 'occupied', patient_id = @patientId,
-            occupied_at = datetime('now'), updated_at = datetime('now')
-      WHERE id = @bedId`
-  ).run({ bedId: Number(bedId), patientId: Number(patientId) });
+  await db
+    .prepare(
+      `UPDATE beds
+          SET status = 'occupied', patient_id = @patientId,
+              occupied_at = datetime('now'), updated_at = datetime('now')
+        WHERE id = @bedId`
+    )
+    .run({ bedId: Number(bedId), patientId: Number(patientId) });
 
-  db.prepare(
-    `UPDATE patients SET bed_id = @bedId, updated_at = datetime('now') WHERE id = @patientId`
-  ).run({ bedId: Number(bedId), patientId: Number(patientId) });
+  await db
+    .prepare(
+      `UPDATE patients SET bed_id = @bedId, updated_at = datetime('now') WHERE id = @patientId`
+    )
+    .run({ bedId: Number(bedId), patientId: Number(patientId) });
 
   return getBed.get(bedId);
 });
 
-export const releaseBed = db.transaction((bedId) => {
-  const bed = getBed.get(bedId);
+export const releaseBed = db.transaction(async (bedId) => {
+  const bed = await getBed.get(bedId);
   if (!bed) throw ApiError.notFound("Bed not found.");
 
   if (bed.patient_id) {
-    db.prepare(
-      `UPDATE patients SET bed_id = NULL, updated_at = datetime('now') WHERE id = ?`
-    ).run(bed.patient_id);
+    await db
+      .prepare(
+        `UPDATE patients SET bed_id = NULL, updated_at = datetime('now') WHERE id = ?`
+      )
+      .run(bed.patient_id);
   }
 
-  db.prepare(
-    `UPDATE beds
-        SET status = 'available', patient_id = NULL, occupied_at = NULL,
-            updated_at = datetime('now')
-      WHERE id = ?`
-  ).run(bedId);
+  await db
+    .prepare(
+      `UPDATE beds
+          SET status = 'available', patient_id = NULL, occupied_at = NULL,
+              updated_at = datetime('now')
+        WHERE id = ?`
+    )
+    .run(bedId);
 
   return getBed.get(bedId);
 });

@@ -14,7 +14,7 @@ const BASE_COLUMNS = `
   u.failed_login_attempts, u.created_at
 `;
 
-export function listUsers({ search = "", status = "", role = "" } = {}) {
+export async function listUsers({ search = "", status = "", role = "" } = {}) {
   const where = [];
   const params = {};
 
@@ -42,11 +42,12 @@ export function listUsers({ search = "", status = "", role = "" } = {}) {
      ORDER BY u.created_at DESC
   `;
 
-  return db.prepare(sql).all(params).map(adminUser);
+  const rows = await db.prepare(sql).all(params);
+  return rows.map(adminUser);
 }
 
-export function getUserById(id) {
-  const row = db
+export async function getUserById(id) {
+  const row = await db
     .prepare(
       `SELECT ${BASE_COLUMNS},
               (SELECT COUNT(*) FROM appointments a WHERE a.user_id = u.id) AS appointment_count,
@@ -59,8 +60,8 @@ export function getUserById(id) {
   return adminUser(row);
 }
 
-export function userStats() {
-  const row = db
+export async function userStats() {
+  const row = await db
     .prepare(
       `SELECT
          COUNT(*) AS total,
@@ -74,12 +75,13 @@ export function userStats() {
     )
     .get();
 
-  const problems = db
+  const problemsRow = await db
     .prepare(
       `SELECT COUNT(*) AS n FROM audit_logs
         WHERE action IN ('login_failed','register_failed','access_denied')`
     )
-    .get().n;
+    .get();
+  const problems = problemsRow.n;
 
   return {
     totalUsers: row.total || 0,
@@ -93,12 +95,12 @@ export function userStats() {
   };
 }
 
-export function setUserStatus(actor, id, status) {
+export async function setUserStatus(actor, id, status) {
   if (!["active", "inactive"].includes(status)) {
     throw ApiError.badRequest("Status must be 'active' or 'inactive'.");
   }
 
-  const target = db.prepare(`SELECT * FROM users WHERE id = ?`).get(Number(id));
+  const target = await db.prepare(`SELECT * FROM users WHERE id = ?`).get(Number(id));
   if (!target) throw ApiError.notFound("User not found.");
 
   if (target.id === actor.id) {
@@ -106,33 +108,34 @@ export function setUserStatus(actor, id, status) {
   }
 
   if (target.role === "admin" && status === "inactive") {
-    const otherAdmins = db
+    const otherAdminsRow = await db
       .prepare(
         `SELECT COUNT(*) AS n FROM users
           WHERE role = 'admin' AND status = 'active' AND id != ?`
       )
-      .get(target.id).n;
+      .get(target.id);
+    const otherAdmins = otherAdminsRow.n;
 
     if (otherAdmins === 0) {
       throw ApiError.conflict("The last active administrator cannot be deactivated.");
     }
   }
 
-  db.prepare(
-    `UPDATE users SET status = ?, updated_at = datetime('now') WHERE id = ?`
-  ).run(status, Number(id));
+  await db
+    .prepare(`UPDATE users SET status = ?, updated_at = datetime('now') WHERE id = ?`)
+    .run(status, Number(id));
 
   /* A deactivated account must lose its live sessions immediately. */
   if (status === "inactive") {
-    revokeAllSessions(Number(id));
+    await revokeAllSessions(Number(id));
   }
 
-  return getUserById(id);
+  return await getUserById(id);
 }
 
 /** Appointment + report history for the admin user drawer. */
-export function userHistory(id) {
-  const appointments = db
+export async function userHistory(id) {
+  const appointments = await db
     .prepare(
       `SELECT a.id, a.appointment_date, a.appointment_time, a.status, a.reason,
               d.name AS doctor_name, dep.name AS department_name
@@ -145,7 +148,7 @@ export function userHistory(id) {
     )
     .all(Number(id));
 
-  const reports = db
+  const reports = await db
     .prepare(
       `SELECT id, title, type, status, report_date
          FROM reports WHERE user_id = ?

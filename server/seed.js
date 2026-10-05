@@ -272,10 +272,12 @@ const RESOURCES = [
 
 /* ================================================================ */
 
-const countOf = (table) =>
-  db.prepare(`SELECT COUNT(*) AS n FROM ${table}`).get().n;
+async function countOf(table) {
+  const row = await db.prepare(`SELECT COUNT(*) AS n FROM ${table}`).get();
+  return row.n;
+}
 
-function ensureAdmin() {
+async function ensureAdmin() {
   /*
    * A lockout guard, not a standing override.
    *
@@ -285,26 +287,28 @@ function ensureAdmin() {
    * audit trail. While SOMEBODY can still administer the hospital,
    * leave the accounts exactly as the administrators left them.
    */
-  const activeAdmins = db
+  const activeAdminsRow = await db
     .prepare(
       `SELECT COUNT(*) AS n FROM users WHERE role = 'admin' AND status = 'active'`
     )
-    .get().n;
+    .get();
 
-  if (activeAdmins > 0) return;
+  if (activeAdminsRow.n > 0) return;
 
-  const existing = db
+  const existing = await db
     .prepare(`SELECT id, role, status FROM users WHERE email = ?`)
     .get(config.adminEmail);
 
   if (existing) {
     /* Reached only with no active administrator left: restore the
        .env account so the hospital can never be locked out. */
-    db.prepare(
-      `UPDATE users SET role = 'admin', status = 'active',
-                        updated_at = datetime('now')
-       WHERE id = ?`
-    ).run(existing.id);
+    await db
+      .prepare(
+        `UPDATE users SET role = 'admin', status = 'active',
+                          updated_at = datetime('now')
+         WHERE id = ?`
+      )
+      .run(existing.id);
 
     console.log(
       `[seed] no active administrator remained — restored ${config.adminEmail}`
@@ -314,30 +318,32 @@ function ensureAdmin() {
 
   const hash = bcrypt.hashSync(config.adminPassword, config.bcryptRounds);
 
-  db.prepare(
-    `INSERT INTO users (name, email, phone, password_hash, role, status)
-     VALUES (?, ?, ?, ?, 'admin', 'active')`
-  ).run(config.adminName, config.adminEmail, "+91 90210 23697", hash);
+  await db
+    .prepare(
+      `INSERT INTO users (name, email, phone, password_hash, role, status)
+       VALUES (?, ?, ?, ?, 'admin', 'active')`
+    )
+    .run(config.adminName, config.adminEmail, "+91 90210 23697", hash);
 
   console.log(`[seed] administrator created: ${config.adminEmail}`);
 }
 
-function seedDepartments() {
-  if (countOf("departments") > 0) return;
+async function seedDepartments() {
+  if ((await countOf("departments")) > 0) return;
 
   const insert = db.prepare(
     `INSERT INTO departments (name, description) VALUES (?, ?)`
   );
 
-  db.transaction(() => {
-    for (const [name, description] of DEPARTMENTS) insert.run(name, description);
+  await db.transaction(async () => {
+    for (const [name, description] of DEPARTMENTS) await insert.run(name, description);
   })();
 
   console.log(`[seed] ${DEPARTMENTS.length} departments created`);
 }
 
-function seedDoctors() {
-  if (countOf("doctors") > 0) return;
+async function seedDoctors() {
+  if ((await countOf("doctors")) > 0) return;
 
   const departmentId = db.prepare(`SELECT id FROM departments WHERE name = ?`);
 
@@ -356,11 +362,11 @@ function seedDoctors() {
     VALUES (?, ?, ?, ?)
   `);
 
-  db.transaction(() => {
+  await db.transaction(async () => {
     for (const doctor of DOCTORS) {
-      const dept = departmentId.get(doctor.department);
+      const dept = await departmentId.get(doctor.department);
 
-      const result = insertDoctor.run({
+      const result = await insertDoctor.run({
         ...doctor,
         department_id: dept?.id ?? null,
       });
@@ -368,7 +374,7 @@ function seedDoctors() {
       /* Monday (1) through Saturday (6). */
       for (let weekday = 1; weekday <= 6; weekday += 1) {
         for (const window of WORKING_WINDOWS) {
-          insertWindow.run(
+          await insertWindow.run(
             result.lastInsertRowid,
             weekday,
             window.start_time,
@@ -394,8 +400,8 @@ function seedDoctors() {
  */
 const DOCTOR_PASSWORD = process.env.DOCTOR_PASSWORD || "doctor123";
 
-function seedDoctorAccounts() {
-  const unlinked = db.prepare(`SELECT * FROM doctors WHERE user_id IS NULL`).all();
+async function seedDoctorAccounts() {
+  const unlinked = await db.prepare(`SELECT * FROM doctors WHERE user_id IS NULL`).all();
   if (unlinked.length === 0) return;
 
   const passwordHash = bcrypt.hashSync(DOCTOR_PASSWORD, config.bcryptRounds);
@@ -408,16 +414,16 @@ function seedDoctorAccounts() {
 
   const linkDoctor = db.prepare(`UPDATE doctors SET user_id = ? WHERE id = ?`);
 
-  db.transaction(() => {
+  await db.transaction(async () => {
     for (const doctor of unlinked) {
-      let account = findUserByEmail.get(doctor.email);
+      let account = await findUserByEmail.get(doctor.email);
 
       if (!account) {
-        const result = insertUser.run(doctor.name, doctor.email, doctor.phone, passwordHash);
+        const result = await insertUser.run(doctor.name, doctor.email, doctor.phone, passwordHash);
         account = { id: result.lastInsertRowid };
       }
 
-      linkDoctor.run(account.id, doctor.id);
+      await linkDoctor.run(account.id, doctor.id);
     }
   })();
 
@@ -428,8 +434,8 @@ function seedDoctorAccounts() {
   console.log(`[seed] ${unlinked.length} doctor login account(s) linked`);
 }
 
-function seedPatients() {
-  if (countOf("patients") > 0) return;
+async function seedPatients() {
+  if ((await countOf("patients")) > 0) return;
 
   const deptId = db.prepare(`SELECT id FROM departments WHERE name = ?`);
   const docId = db.prepare(`SELECT id FROM doctors WHERE name = ?`);
@@ -443,16 +449,16 @@ function seedPatients() {
        @doctor_id, @room, @status, @admitted_at, @medical_history)
   `);
 
-  db.transaction(() => {
+  await db.transaction(async () => {
     for (const patient of PATIENTS) {
-      insert.run({
+      await insert.run({
         name: patient.name,
         phone: patient.phone,
         date_of_birth: patient.date_of_birth,
         gender: patient.gender,
         blood_group: patient.blood_group,
-        department_id: deptId.get(patient.department)?.id ?? null,
-        doctor_id: docId.get(patient.doctor)?.id ?? null,
+        department_id: (await deptId.get(patient.department))?.id ?? null,
+        doctor_id: (await docId.get(patient.doctor))?.id ?? null,
         room: patient.room,
         status: patient.status,
         admitted_at: patient.admitted_at,
@@ -464,8 +470,8 @@ function seedPatients() {
   console.log(`[seed] ${PATIENTS.length} patient records created`);
 }
 
-function seedPharmacy() {
-  if (countOf("pharmacy_items") > 0) return;
+async function seedPharmacy() {
+  if ((await countOf("pharmacy_items")) > 0) return;
 
   const insert = db.prepare(`
     INSERT INTO pharmacy_items
@@ -473,15 +479,15 @@ function seedPharmacy() {
     VALUES (?, ?, ?, ?, ?, ?)
   `);
 
-  db.transaction(() => {
-    for (const row of PHARMACY) insert.run(...row);
+  await db.transaction(async () => {
+    for (const row of PHARMACY) await insert.run(...row);
   })();
 
   console.log(`[seed] ${PHARMACY.length} pharmacy items created`);
 }
 
-function seedLaboratory() {
-  if (countOf("laboratory_tests") > 0) return;
+async function seedLaboratory() {
+  if ((await countOf("laboratory_tests")) > 0) return;
 
   const patientId = db.prepare(`SELECT id FROM patients WHERE name = ?`);
 
@@ -491,10 +497,10 @@ function seedLaboratory() {
     VALUES (?, ?, ?, ?, ?, ?, ?, ?)
   `);
 
-  db.transaction(() => {
+  await db.transaction(async () => {
     for (const [name, test, category, price, date, status, result] of LAB_TESTS) {
-      insert.run(
-        patientId.get(name)?.id ?? null,
+      await insert.run(
+        (await patientId.get(name))?.id ?? null,
         name,
         test,
         category,
@@ -509,8 +515,8 @@ function seedLaboratory() {
   console.log(`[seed] ${LAB_TESTS.length} laboratory tests created`);
 }
 
-function seedBilling() {
-  if (countOf("billing_records") > 0) return;
+async function seedBilling() {
+  if ((await countOf("billing_records")) > 0) return;
 
   const patientId = db.prepare(`SELECT id FROM patients WHERE name = ?`);
 
@@ -521,11 +527,11 @@ function seedBilling() {
     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `);
 
-  db.transaction(() => {
+  await db.transaction(async () => {
     for (const [inv, name, amount, tax, discount, insurance, status, date] of BILLING) {
-      insert.run(
+      await insert.run(
         inv,
-        patientId.get(name)?.id ?? null,
+        (await patientId.get(name))?.id ?? null,
         name,
         amount,
         tax,
@@ -541,8 +547,8 @@ function seedBilling() {
   console.log(`[seed] ${BILLING.length} billing records created`);
 }
 
-function seedEmergency() {
-  if (countOf("emergency_cases") > 0) return;
+async function seedEmergency() {
+  if ((await countOf("emergency_cases")) > 0) return;
 
   const insert = db.prepare(`
     INSERT INTO emergency_cases
@@ -550,23 +556,23 @@ function seedEmergency() {
     VALUES (?, ?, ?, ?, ?, ?)
   `);
 
-  db.transaction(() => {
-    for (const row of EMERGENCY) insert.run(...row);
+  await db.transaction(async () => {
+    for (const row of EMERGENCY) await insert.run(...row);
   })();
 
   console.log(`[seed] ${EMERGENCY.length} emergency cases created`);
 }
 
-function seedResources() {
-  if (countOf("hospital_resources") > 0) return;
+async function seedResources() {
+  if ((await countOf("hospital_resources")) > 0) return;
 
   const insert = db.prepare(`
     INSERT OR IGNORE INTO hospital_resources (kind, label, value, meta)
     VALUES (?, ?, ?, ?)
   `);
 
-  db.transaction(() => {
-    for (const row of RESOURCES) insert.run(...row);
+  await db.transaction(async () => {
+    for (const row of RESOURCES) await insert.run(...row);
   })();
 
   console.log("[seed] hospital resources created");
@@ -577,17 +583,17 @@ function seedResources() {
  * something real to chart on a brand new database. These belong to
  * the seeded patients, not to any user account.
  */
-function seedHistoricalAppointments() {
-  if (countOf("appointments") > 0) return;
+async function seedHistoricalAppointments() {
+  if ((await countOf("appointments")) > 0) return;
 
-  const admin = db
+  const admin = await db
     .prepare(`SELECT id FROM users WHERE email = ?`)
     .get(config.adminEmail);
 
   if (!admin) return;
 
-  const doctors = db.prepare(`SELECT id, department_id FROM doctors`).all();
-  const patients = db.prepare(`SELECT id, name FROM patients`).all();
+  const doctors = await db.prepare(`SELECT id, department_id FROM doctors`).all();
+  const patients = await db.prepare(`SELECT id, name FROM patients`).all();
 
   if (doctors.length === 0 || patients.length === 0) return;
 
@@ -607,7 +613,7 @@ function seedHistoricalAppointments() {
     "General health check",
   ];
 
-  db.transaction(() => {
+  await db.transaction(async () => {
     let n = 0;
 
     for (let dayOffset = -12; dayOffset <= 6; dayOffset += 1) {
@@ -617,7 +623,9 @@ function seedHistoricalAppointments() {
       for (let i = 0; i < perDay; i += 1) {
         const doctor = doctors[n % doctors.length];
         const patient = patients[n % patients.length];
-        const slot = slots[(n + dayOffset) % slots.length];
+        /* dayOffset starts negative, and JS % keeps the sign — without
+           the extra wrap this indexes past the start of the array. */
+        const slot = slots[(((n + dayOffset) % slots.length) + slots.length) % slots.length];
 
         const status =
           dayOffset < 0
@@ -628,7 +636,7 @@ function seedHistoricalAppointments() {
             ? "confirmed"
             : "scheduled";
 
-        insert.run(
+        await insert.run(
           admin.id,
           patient.id,
           doctor.id,
@@ -647,18 +655,18 @@ function seedHistoricalAppointments() {
   console.log("[seed] historical appointments created for analytics");
 }
 
-export function runSeed() {
-  ensureAdmin();
-  seedDepartments();
-  seedDoctors();
-  seedDoctorAccounts();
-  seedPatients();
-  seedPharmacy();
-  seedLaboratory();
-  seedBilling();
-  seedEmergency();
-  seedResources();
-  seedHistoricalAppointments();
+export async function runSeed() {
+  await ensureAdmin();
+  await seedDepartments();
+  await seedDoctors();
+  await seedDoctorAccounts();
+  await seedPatients();
+  await seedPharmacy();
+  await seedLaboratory();
+  await seedBilling();
+  await seedEmergency();
+  await seedResources();
+  await seedHistoricalAppointments();
 }
 
 export default runSeed;

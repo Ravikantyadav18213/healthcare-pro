@@ -1,5 +1,5 @@
 import db from "../db.js";
-import { emitToUser } from "../sockets/index.js";
+import { emitToUser } from "./realtime.js";
 
 const insert = db.prepare(`
   INSERT INTO notifications (user_id, title, message, type, link)
@@ -13,12 +13,14 @@ const findAdmins = db.prepare(
 /**
  * Create an in-app notification for a user.
  * Never throws — a failed notification must not fail the action.
+ * Callers should `await` this: on serverless, an un-awaited write can
+ * be dropped when the function freezes right after the response.
  */
-export function notify(userId, { title, message, type = "info", link = null }) {
+export async function notify(userId, { title, message, type = "info", link = null }) {
   if (!userId) return;
 
   try {
-    insert.run({
+    await insert.run({
       user_id: userId,
       title,
       message,
@@ -27,7 +29,7 @@ export function notify(userId, { title, message, type = "info", link = null }) {
     });
 
     /* Push it now instead of making the bell wait out its poll. */
-    emitToUser(userId, "notification:new", { title, message, type, link });
+    await emitToUser(userId, "notification:new", { title, message, type, link });
   } catch (error) {
     console.error("[notify] failed:", error.message);
   }
@@ -39,7 +41,7 @@ export function notify(userId, { title, message, type = "info", link = null }) {
  * `exceptUserId` skips the person who triggered the action, so an
  * admin never gets notified about their own click.
  */
-export function notifyAdmins({
+export async function notifyAdmins({
   title,
   message,
   type = "info",
@@ -47,10 +49,12 @@ export function notifyAdmins({
   exceptUserId = null,
 }) {
   try {
-    for (const admin of findAdmins.all()) {
+    const admins = await findAdmins.all();
+
+    for (const admin of admins) {
       if (exceptUserId && admin.id === Number(exceptUserId)) continue;
 
-      insert.run({
+      await insert.run({
         user_id: admin.id,
         title,
         message,
@@ -58,7 +62,7 @@ export function notifyAdmins({
         link,
       });
 
-      emitToUser(admin.id, "notification:new", { title, message, type, link });
+      await emitToUser(admin.id, "notification:new", { title, message, type, link });
     }
   } catch (error) {
     console.error("[notifyAdmins] failed:", error.message);

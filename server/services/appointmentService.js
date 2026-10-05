@@ -4,7 +4,7 @@ import notify, { notifyAdmins } from "../utils/notify.js";
 import { publicAppointment } from "../utils/sanitize.js";
 import { today, nowTime, isValidDate, isValidTime } from "../utils/time.js";
 import { isSlotWithinSchedule } from "./doctorService.js";
-import { emitToAdmins } from "../sockets/index.js";
+import { emitToAdmins } from "../utils/realtime.js";
 
 /* Statuses that still hold the doctor's slot. */
 export const LIVE_STATUSES = [
@@ -76,19 +76,19 @@ function prettyDate(value) {
  * not just the patient and the administrators. Catalog rows that were
  * never linked to a user account simply have no one to notify.
  */
-function notifyDoctor(doctorUserId, actor, payload) {
+async function notifyDoctor(doctorUserId, actor, payload) {
   if (!doctorUserId) return;
   if (actor && Number(actor.id) === Number(doctorUserId)) return;
 
-  notify(doctorUserId, { ...payload, link: "/doctor/appointments" });
+  await notify(doctorUserId, { ...payload, link: "/doctor/appointments" });
 }
 
 /* ==================================================================
    LOOKUPS
 ================================================================== */
 
-export function getAppointment(id) {
-  const row = findById.get(Number(id));
+export async function getAppointment(id) {
+  const row = await findById.get(Number(id));
   if (!row) throw ApiError.notFound("Appointment not found.");
   return publicAppointment(row);
 }
@@ -97,8 +97,8 @@ export function getAppointment(id) {
  * Ownership is verified against the row in the database, never
  * against anything the client claimed.
  */
-export function getOwnedAppointment(id, user) {
-  const row = findById.get(Number(id));
+export async function getOwnedAppointment(id, user) {
+  const row = await findById.get(Number(id));
   if (!row) throw ApiError.notFound("Appointment not found.");
 
   if (user.role !== "admin" && row.user_id !== user.id) {
@@ -174,7 +174,7 @@ function buildFilters({ search, status, scope, from, to, doctorId, departmentId,
   return { where, params };
 }
 
-export function listAppointments(filters = {}) {
+export async function listAppointments(filters = {}) {
   const { where, params } = buildFilters(filters);
 
   const limit = Math.min(Number(filters.limit) || 200, 500);
@@ -187,7 +187,7 @@ export function listAppointments(filters = {}) {
     LIMIT ${limit} OFFSET ${offset}
   `;
 
-  const rows = db.prepare(sql).all(params);
+  const rows = await db.prepare(sql).all(params);
 
   const countSql = `
     SELECT COUNT(*) AS n
@@ -199,7 +199,7 @@ export function listAppointments(filters = {}) {
     ${where.length ? `WHERE ${where.join(" AND ")}` : ""}
   `;
 
-  const total = db.prepare(countSql).get(params).n;
+  const total = (await db.prepare(countSql).get(params)).n;
 
   return { items: rows.map(publicAppointment), total };
 }
@@ -221,7 +221,7 @@ function slotTakenError() {
   return ApiError.conflict("This appointment slot is no longer available.");
 }
 
-function assertBookable({ doctorId, date, time }) {
+async function assertBookable({ doctorId, date, time }) {
   if (!isValidDate(date)) {
     throw ApiError.validation({ date: "Choose a valid appointment date." });
   }
@@ -242,7 +242,7 @@ function assertBookable({ doctorId, date, time }) {
     });
   }
 
-  const doctor = db
+  const doctor = await db
     .prepare(`SELECT * FROM doctors WHERE id = ?`)
     .get(Number(doctorId));
 
@@ -254,13 +254,13 @@ function assertBookable({ doctorId, date, time }) {
     throw ApiError.conflict("This doctor is not currently accepting appointments.");
   }
 
-  if (!isSlotWithinSchedule(doctorId, date, time)) {
+  if (!(await isSlotWithinSchedule(doctorId, date, time))) {
     throw ApiError.conflict(
       "The selected time is outside this doctor's clinic hours."
     );
   }
 
-  const clash = db
+  const clash = await db
     .prepare(
       `SELECT id FROM appointments
         WHERE doctor_id = ? AND appointment_date = ? AND appointment_time = ?
@@ -273,7 +273,7 @@ function assertBookable({ doctorId, date, time }) {
   return doctor;
 }
 
-export function createAppointment(actor, payload) {
+export async function createAppointment(actor, payload) {
   const {
     doctorId,
     departmentId,
@@ -294,10 +294,10 @@ export function createAppointment(actor, payload) {
       ? Number(requestedUserId)
       : actor.id;
 
-  const owner = db.prepare(`SELECT * FROM users WHERE id = ?`).get(ownerId);
+  const owner = await db.prepare(`SELECT * FROM users WHERE id = ?`).get(ownerId);
   if (!owner) throw ApiError.badRequest("The selected account does not exist.");
 
-  const doctor = assertBookable({ doctorId, date, time });
+  const doctor = await assertBookable({ doctorId, date, time });
 
   /* Prefer an explicit patient (admin flow), else the user's own profile. */
   let patientId = null;
@@ -305,7 +305,7 @@ export function createAppointment(actor, payload) {
   if (actor.role === "admin" && requestedPatientId) {
     patientId = Number(requestedPatientId);
   } else {
-    const profile = db
+    const profile = await db
       .prepare(`SELECT id FROM patients WHERE user_id = ? ORDER BY id LIMIT 1`)
       .get(ownerId);
     patientId = profile?.id ?? null;
@@ -313,7 +313,7 @@ export function createAppointment(actor, payload) {
 
   /* A missing patient profile should never block booking. */
   if (!patientId) {
-    const result = db
+    const result = await db
       .prepare(
         `INSERT INTO patients (user_id, name, phone, email, status)
          VALUES (?, ?, ?, ?, 'Outpatient')`
@@ -325,7 +325,7 @@ export function createAppointment(actor, payload) {
   let created;
 
   try {
-    const result = insertAppointment.run({
+    const result = await insertAppointment.run({
       user_id: ownerId,
       patient_id: patientId,
       doctor_id: Number(doctorId),
@@ -345,7 +345,7 @@ export function createAppointment(actor, payload) {
       status: actor.role === "admin" ? "confirmed" : "pending",
     });
 
-    created = findById.get(result.lastInsertRowid);
+    created = await findById.get(result.lastInsertRowid);
   } catch (error) {
     /* The partial unique index is the last line of defence against
        two people submitting the same slot at the same moment. */
@@ -356,7 +356,7 @@ export function createAppointment(actor, payload) {
   }
 
   /* ---- receipt for the patient (names both people) ---- */
-  notify(ownerId, {
+  await notify(ownerId, {
     title:
       actor.role === "admin" ? "Appointment booked" : "Request sent for approval",
     message:
@@ -372,7 +372,7 @@ export function createAppointment(actor, payload) {
   });
 
   /* ---- alert every administrator so it can be reviewed ---- */
-  notifyAdmins({
+  await notifyAdmins({
     title:
       actor.role === "admin"
         ? "Appointment created"
@@ -388,7 +388,7 @@ export function createAppointment(actor, payload) {
   });
 
   /* ---- the doctor whose slot was taken ---- */
-  notifyDoctor(doctor.user_id, actor, {
+  await notifyDoctor(doctor.user_id, actor, {
     title:
       actor.role === "admin" ? "New appointment booked" : "New appointment request",
     message: `${owner.name} booked you on ${prettyDate(date)} at ${time}.${
@@ -399,7 +399,7 @@ export function createAppointment(actor, payload) {
 
   /* Moves Appointments Today, and Total Patients too on the
      no-existing-profile path a few lines up. */
-  emitToAdmins("dashboard:stats-changed", { source: "appointments" });
+  await emitToAdmins("dashboard:stats-changed", { source: "appointments" });
 
   return publicAppointment(created);
 }
@@ -414,8 +414,8 @@ const setStatus = db.prepare(`
    WHERE id = ?
 `);
 
-export function cancelAppointment(actor, id) {
-  const row = getOwnedAppointment(id, actor);
+export async function cancelAppointment(actor, id) {
+  const row = await getOwnedAppointment(id, actor);
 
   if (row.status === "cancelled") {
     throw ApiError.conflict("This appointment is already cancelled.");
@@ -425,13 +425,13 @@ export function cancelAppointment(actor, id) {
     throw ApiError.conflict("A completed appointment cannot be cancelled.");
   }
 
-  setStatus.run("cancelled", actor.role, Number(id));
+  await setStatus.run("cancelled", actor.role, Number(id));
 
   const when = `${prettyDate(row.appointment_date)} at ${row.appointment_time}`;
 
   /* The patient is told only when somebody else cancelled for them. */
   if (row.user_id !== actor.id) {
-    notify(row.user_id, {
+    await notify(row.user_id, {
       title: "Appointment cancelled",
       message: `The hospital cancelled your appointment with ${row.doctor_name} on ${when}.`,
       type: "warning",
@@ -441,7 +441,7 @@ export function cancelAppointment(actor, id) {
 
   /* Administrators are told when a patient cancels. */
   if (actor.role !== "admin") {
-    notifyAdmins({
+    await notifyAdmins({
       title: "Appointment cancelled by patient",
       message: `${row.patient_display_name || "A patient"} cancelled with ${
         row.doctor_name
@@ -452,19 +452,19 @@ export function cancelAppointment(actor, id) {
     });
   }
 
-  notifyDoctor(row.doctor_user_id, actor, {
+  await notifyDoctor(row.doctor_user_id, actor, {
     title: "Appointment cancelled",
     message: `${row.patient_display_name || "A patient"}'s appointment with you on ${when} was cancelled. The slot is free again.`,
     type: "warning",
   });
 
-  emitToAdmins("dashboard:stats-changed", { source: "appointments" });
+  await emitToAdmins("dashboard:stats-changed", { source: "appointments" });
 
-  return publicAppointment(findById.get(Number(id)));
+  return publicAppointment(await findById.get(Number(id)));
 }
 
-export function rescheduleAppointment(actor, id, { date, time }) {
-  const row = getOwnedAppointment(id, actor);
+export async function rescheduleAppointment(actor, id, { date, time }) {
+  const row = await getOwnedAppointment(id, actor);
 
   if (["cancelled", "completed", "no_show"].includes(row.status)) {
     throw ApiError.conflict(
@@ -476,10 +476,10 @@ export function rescheduleAppointment(actor, id, { date, time }) {
     throw ApiError.badRequest("Choose a different date or time to reschedule.");
   }
 
-  assertBookable({ doctorId: row.doctor_id, date, time });
+  await assertBookable({ doctorId: row.doctor_id, date, time });
 
   try {
-    db.prepare(
+    await db.prepare(
       `UPDATE appointments
           SET appointment_date = ?, appointment_time = ?,
               status = 'rescheduled', updated_at = datetime('now')
@@ -493,7 +493,7 @@ export function rescheduleAppointment(actor, id, { date, time }) {
   }
 
   if (row.user_id !== actor.id) {
-    notify(row.user_id, {
+    await notify(row.user_id, {
       title: "Appointment rescheduled",
       message: `The hospital moved your appointment with ${
         row.doctor_name
@@ -504,7 +504,7 @@ export function rescheduleAppointment(actor, id, { date, time }) {
   }
 
   if (actor.role !== "admin") {
-    notifyAdmins({
+    await notifyAdmins({
       title: "Appointment rescheduled by patient",
       message: `${row.patient_display_name || "A patient"} moved their ${
         row.doctor_name
@@ -517,7 +517,7 @@ export function rescheduleAppointment(actor, id, { date, time }) {
     });
   }
 
-  notifyDoctor(row.doctor_user_id, actor, {
+  await notifyDoctor(row.doctor_user_id, actor, {
     title: "Appointment rescheduled",
     message: `${row.patient_display_name || "A patient"} moved their appointment with you from ${prettyDate(
       row.appointment_date
@@ -526,9 +526,9 @@ export function rescheduleAppointment(actor, id, { date, time }) {
   });
 
   /* A moved date can push an appointment in or out of "today". */
-  emitToAdmins("dashboard:stats-changed", { source: "appointments" });
+  await emitToAdmins("dashboard:stats-changed", { source: "appointments" });
 
-  return publicAppointment(findById.get(Number(id)));
+  return publicAppointment(await findById.get(Number(id)));
 }
 
 /*
@@ -633,12 +633,12 @@ const recordDecision = db.prepare(`
  * The patient is always notified, and the message names both the
  * patient and the doctor so it reads on its own.
  */
-export function updateAppointmentStatus(actor, id, status, note = null) {
+export async function updateAppointmentStatus(actor, id, status, note = null) {
   if (!ALL_STATUSES.includes(status)) {
     throw ApiError.badRequest("Unknown appointment status.");
   }
 
-  const row = findById.get(Number(id));
+  const row = await findById.get(Number(id));
   if (!row) throw ApiError.notFound("Appointment not found.");
 
   if (row.status === status) {
@@ -649,7 +649,7 @@ export function updateAppointmentStatus(actor, id, status, note = null) {
 
   const cleanNote = note ? String(note).trim().slice(0, 300) : null;
 
-  recordDecision.run({
+  await recordDecision.run({
     id: Number(id),
     status,
     note: cleanNote,
@@ -662,7 +662,7 @@ export function updateAppointmentStatus(actor, id, status, note = null) {
   if (notice && row.user_id !== actor.id) {
     const patient = row.patient_display_name || "Patient";
 
-    notify(row.user_id, {
+    await notify(row.user_id, {
       title: notice.title,
       message:
         `${patient}, your appointment with ${row.doctor_name}` +
@@ -678,7 +678,7 @@ export function updateAppointmentStatus(actor, id, status, note = null) {
   const doctorNotice = DOCTOR_STATUS_NOTICE[status];
 
   if (doctorNotice) {
-    notifyDoctor(row.doctor_user_id, actor, {
+    await notifyDoctor(row.doctor_user_id, actor, {
       title: doctorNotice.title,
       message:
         `${row.patient_display_name || "A patient"}'s appointment with you on ` +
@@ -690,23 +690,23 @@ export function updateAppointmentStatus(actor, id, status, note = null) {
   }
 
   /* completed/cancelled/no_show all move Appointments Today. */
-  emitToAdmins("dashboard:stats-changed", { source: "appointments" });
+  await emitToAdmins("dashboard:stats-changed", { source: "appointments" });
 
-  return publicAppointment(findById.get(Number(id)));
+  return publicAppointment(await findById.get(Number(id)));
 }
 
 /**
  * Permanently removes an appointment record (administrator only).
  * The patient is always told, since the row disappears from their list.
  */
-export function deleteAppointment(actor, id) {
-  const row = findById.get(Number(id));
+export async function deleteAppointment(actor, id) {
+  const row = await findById.get(Number(id));
   if (!row) throw ApiError.notFound("Appointment not found.");
 
-  db.prepare(`DELETE FROM appointments WHERE id = ?`).run(Number(id));
+  await db.prepare(`DELETE FROM appointments WHERE id = ?`).run(Number(id));
 
   if (row.user_id !== actor.id) {
-    notify(row.user_id, {
+    await notify(row.user_id, {
       title: "Appointment removed",
       message: `Your appointment with ${row.doctor_name} on ${prettyDate(
         row.appointment_date
@@ -716,7 +716,7 @@ export function deleteAppointment(actor, id) {
     });
   }
 
-  notifyDoctor(row.doctor_user_id, actor, {
+  await notifyDoctor(row.doctor_user_id, actor, {
     title: "Appointment removed",
     message: `${row.patient_display_name || "A patient"}'s appointment with you on ${prettyDate(
       row.appointment_date
@@ -724,7 +724,7 @@ export function deleteAppointment(actor, id) {
     type: "warning",
   });
 
-  emitToAdmins("dashboard:stats-changed", { source: "appointments" });
+  await emitToAdmins("dashboard:stats-changed", { source: "appointments" });
 
   return {
     id: Number(id),
@@ -733,26 +733,26 @@ export function deleteAppointment(actor, id) {
   };
 }
 
-export function updateAppointmentNotes(id, notes) {
-  const row = findById.get(Number(id));
+export async function updateAppointmentNotes(id, notes) {
+  const row = await findById.get(Number(id));
   if (!row) throw ApiError.notFound("Appointment not found.");
 
-  db.prepare(
+  await db.prepare(
     `UPDATE appointments SET notes = ?, updated_at = datetime('now') WHERE id = ?`
   ).run(notes ? String(notes).trim() : null, Number(id));
 
-  return publicAppointment(findById.get(Number(id)));
+  return publicAppointment(await findById.get(Number(id)));
 }
 
 /* ==================================================================
    SUMMARIES
 ================================================================== */
 
-export function appointmentStats(userId = null) {
+export async function appointmentStats(userId = null) {
   const scope = userId ? "WHERE user_id = @userId" : "";
   const params = userId ? { userId: Number(userId), today: today() } : { today: today() };
 
-  const row = db
+  const row = await db
     .prepare(
       `SELECT
          COUNT(*) AS total,
@@ -783,8 +783,8 @@ export function appointmentStats(userId = null) {
   };
 }
 
-export function nextAppointmentFor(userId) {
-  const row = db
+export async function nextAppointmentFor(userId) {
+  const row = await db
     .prepare(
       `${SELECT_APPOINTMENT}
         WHERE a.user_id = @userId

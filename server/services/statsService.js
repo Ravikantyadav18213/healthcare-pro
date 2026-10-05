@@ -1,7 +1,7 @@
 import db from "../db.js";
 import ApiError from "../utils/ApiError.js";
 import { today, addDays } from "../utils/time.js";
-import { emitToAdmins } from "../sockets/index.js";
+import { emitToAdmins } from "../utils/realtime.js";
 
 /* ==================================================================
    ADMIN DASHBOARD ANALYTICS
@@ -11,62 +11,69 @@ import { emitToAdmins } from "../sockets/index.js";
    database at the moment it is requested.
 ================================================================== */
 
-function resourceValue(kind, label, fallback = 0) {
-  const row = db
+async function resourceValue(kind, label, fallback = 0) {
+  const row = await db
     .prepare(`SELECT value FROM hospital_resources WHERE kind = ? AND label = ?`)
     .get(kind, label);
 
   return row ? Number(row.value) || 0 : fallback;
 }
 
-export function adminOverview() {
+export async function adminOverview() {
   const day = today();
 
-  const totalPatients = db.prepare(`SELECT COUNT(*) AS n FROM patients`).get().n;
+  const totalPatientsRow = await db.prepare(`SELECT COUNT(*) AS n FROM patients`).get();
+  const totalPatients = totalPatientsRow.n;
 
-  const totalDoctors = db
+  const totalDoctorsRow = await db
     .prepare(`SELECT COUNT(*) AS n FROM doctors WHERE status = 'active'`)
-    .get().n;
+    .get();
+  const totalDoctors = totalDoctorsRow.n;
 
-  const appointmentsToday = db
+  const appointmentsTodayRow = await db
     .prepare(
       `SELECT COUNT(*) AS n FROM appointments
         WHERE appointment_date = ?
           AND status IN ('pending','scheduled','confirmed','rescheduled','completed')`
     )
-    .get(day).n;
+    .get(day);
+  const appointmentsToday = appointmentsTodayRow.n;
 
-  const icuTotal = resourceValue("icu", "total", 20);
-  const icuOccupied = resourceValue("icu", "occupied", 0);
+  const icuTotal = await resourceValue("icu", "total", 20);
+  const icuOccupied = await resourceValue("icu", "occupied", 0);
 
-  const revenueToday = db
+  const revenueTodayRow = await db
     .prepare(
       `SELECT COALESCE(SUM(total), 0) AS amount
          FROM billing_records
         WHERE status = 'Paid' AND issued_at = ?`
     )
-    .get(day).amount;
+    .get(day);
+  const revenueToday = revenueTodayRow.amount;
 
   /* Fall back to the most recent paid day so a brand new database
      still shows a meaningful figure instead of a flat zero. */
-  const revenueFallback = db
+  const revenueFallbackRow = await db
     .prepare(
       `SELECT COALESCE(SUM(total), 0) AS amount
          FROM billing_records
         WHERE status = 'Paid'
           AND issued_at = (SELECT MAX(issued_at) FROM billing_records WHERE status = 'Paid')`
     )
-    .get().amount;
+    .get();
+  const revenueFallback = revenueFallbackRow.amount;
 
-  const pharmacySales = db
+  const pharmacySalesRow = await db
     .prepare(
       `SELECT COALESCE(SUM(stock), 0) AS units FROM pharmacy_items WHERE status = 'active'`
     )
-    .get().units;
+    .get();
+  const pharmacySales = pharmacySalesRow.units;
 
-  const emergencyCases = db
+  const emergencyCasesRow = await db
     .prepare(`SELECT COUNT(*) AS n FROM emergency_cases WHERE status = 'Active'`)
-    .get().n;
+    .get();
+  const emergencyCases = emergencyCasesRow.n;
 
   /*
    * "Discharged Today" reads as a single hospital-wide figure, but a
@@ -80,27 +87,30 @@ export function adminOverview() {
    * status change, so this is a sum of two identically-shaped counts
    * — no schema change needed on either side.
    */
-  const dischargedToday =
-    db
-      .prepare(
-        `SELECT COUNT(*) AS n FROM emergency_cases
-          WHERE status = 'Discharged' AND date(updated_at) = ?`
-      )
-      .get(day).n +
-    db
-      .prepare(
-        `SELECT COUNT(*) AS n FROM patients
-          WHERE status = 'Discharged' AND date(updated_at) = ?`
-      )
-      .get(day).n;
+  const dischargedEmergencyRow = await db
+    .prepare(
+      `SELECT COUNT(*) AS n FROM emergency_cases
+        WHERE status = 'Discharged' AND date(updated_at) = ?`
+    )
+    .get(day);
+  const dischargedPatientsRow = await db
+    .prepare(
+      `SELECT COUNT(*) AS n FROM patients
+        WHERE status = 'Discharged' AND date(updated_at) = ?`
+    )
+    .get(day);
+  const dischargedToday = dischargedEmergencyRow.n + dischargedPatientsRow.n;
 
   /* Same two sources as above, not reset at midnight — the all-time
      running total shown as the small "X all-time" line under the
      Discharged Today figure, not a tile of its own. */
-  const dischargedTotal =
-    db.prepare(`SELECT COUNT(*) AS n FROM emergency_cases WHERE status = 'Discharged'`).get()
-      .n +
-    db.prepare(`SELECT COUNT(*) AS n FROM patients WHERE status = 'Discharged'`).get().n;
+  const dischargedTotalEmergencyRow = await db
+    .prepare(`SELECT COUNT(*) AS n FROM emergency_cases WHERE status = 'Discharged'`)
+    .get();
+  const dischargedTotalPatientsRow = await db
+    .prepare(`SELECT COUNT(*) AS n FROM patients WHERE status = 'Discharged'`)
+    .get();
+  const dischargedTotal = dischargedTotalEmergencyRow.n + dischargedTotalPatientsRow.n;
 
   return {
     totalPatients,
@@ -126,10 +136,10 @@ export function adminOverview() {
    an admin can search instead of just seeing a raw count.
 ================================================================== */
 
-export function dischargedList({ search = "" } = {}) {
+export async function dischargedList({ search = "" } = {}) {
   const term = `%${String(search).trim()}%`;
 
-  const rows = db
+  const rows = await db
     .prepare(
       `SELECT * FROM (
          SELECT 'Emergency'     AS source,
@@ -185,7 +195,7 @@ const upsertResource = db.prepare(`
   ON CONFLICT (kind, label) DO UPDATE SET value = excluded.value
 `);
 
-export function setIcuStatus({ total, occupied }) {
+export async function setIcuStatus({ total, occupied }) {
   if (!Number.isFinite(Number(total)) || !Number.isFinite(Number(occupied))) {
     throw ApiError.badRequest("Total and occupied beds must be numbers.");
   }
@@ -197,13 +207,13 @@ export function setIcuStatus({ total, occupied }) {
     throw ApiError.badRequest("Occupied beds cannot exceed total beds.");
   }
 
-  db.transaction(() => {
-    upsertResource.run({ kind: "icu", label: "total", value: String(nextTotal) });
-    upsertResource.run({ kind: "icu", label: "occupied", value: String(nextOccupied) });
+  await db.transaction(async () => {
+    await upsertResource.run({ kind: "icu", label: "total", value: String(nextTotal) });
+    await upsertResource.run({ kind: "icu", label: "occupied", value: String(nextOccupied) });
   })();
 
   /* Moves the ICU Beds Free tile on the dashboard. */
-  emitToAdmins("dashboard:stats-changed", { source: "icu" });
+  await emitToAdmins("dashboard:stats-changed", { source: "icu" });
 
   return {
     icuBedsTotal: nextTotal,
@@ -213,29 +223,29 @@ export function setIcuStatus({ total, occupied }) {
 }
 
 /** Paid revenue for each of the last N days. */
-export function revenueTrend(days = 7) {
+export async function revenueTrend(days = 7) {
   const labels = [];
   const values = [];
 
   for (let i = days - 1; i >= 0; i -= 1) {
     const date = addDays(today(), -i);
 
-    const amount = db
+    const row = await db
       .prepare(
         `SELECT COALESCE(SUM(total), 0) AS amount
            FROM billing_records WHERE status = 'Paid' AND issued_at = ?`
       )
-      .get(date).amount;
+      .get(date);
 
     labels.push(date);
-    values.push(Math.round(amount));
+    values.push(Math.round(row.amount));
   }
 
   return { labels, values };
 }
 
-export function patientsByDepartment() {
-  const rows = db
+export async function patientsByDepartment() {
+  const rows = await db
     .prepare(
       `SELECT dep.name AS label, COUNT(p.id) AS value
          FROM departments dep
@@ -252,22 +262,22 @@ export function patientsByDepartment() {
   };
 }
 
-export function appointmentsByDay(days = 7) {
+export async function appointmentsByDay(days = 7) {
   const labels = [];
   const values = [];
 
   for (let i = days - 1; i >= 0; i -= 1) {
     const date = addDays(today(), -i);
 
-    const count = db
+    const row = await db
       .prepare(
         `SELECT COUNT(*) AS n FROM appointments
           WHERE appointment_date = ? AND status != 'cancelled'`
       )
-      .get(date).n;
+      .get(date);
 
     labels.push(date);
-    values.push(count);
+    values.push(row.n);
   }
 
   return { labels, values };
@@ -308,39 +318,39 @@ export function datesInMonth(year, month) {
   );
 }
 
-export function revenueTrendForDates(dates) {
+export async function revenueTrendForDates(dates) {
   const labels = [];
   const values = [];
 
   for (const date of dates) {
-    const amount = db
+    const row = await db
       .prepare(
         `SELECT COALESCE(SUM(total), 0) AS amount
            FROM billing_records WHERE status = 'Paid' AND issued_at = ?`
       )
-      .get(date).amount;
+      .get(date);
 
     labels.push(date);
-    values.push(Math.round(amount));
+    values.push(Math.round(row.amount));
   }
 
   return { labels, values };
 }
 
-export function appointmentsByDayForDates(dates) {
+export async function appointmentsByDayForDates(dates) {
   const labels = [];
   const values = [];
 
   for (const date of dates) {
-    const count = db
+    const row = await db
       .prepare(
         `SELECT COUNT(*) AS n FROM appointments
           WHERE appointment_date = ? AND status != 'cancelled'`
       )
-      .get(date).n;
+      .get(date);
 
     labels.push(date);
-    values.push(count);
+    values.push(row.n);
   }
 
   return { labels, values };
@@ -351,43 +361,43 @@ const MONTH_NAMES = [
   "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
 ];
 
-export function revenueTrendForYear(year) {
+export async function revenueTrendForYear(year) {
   const labels = [];
   const values = [];
 
   for (let month = 1; month <= 12; month += 1) {
     const ym = `${year}-${String(month).padStart(2, "0")}`;
 
-    const amount = db
+    const row = await db
       .prepare(
         `SELECT COALESCE(SUM(total), 0) AS amount
            FROM billing_records WHERE status = 'Paid' AND substr(issued_at, 1, 7) = ?`
       )
-      .get(ym).amount;
+      .get(ym);
 
     labels.push(MONTH_NAMES[month - 1]);
-    values.push(Math.round(amount));
+    values.push(Math.round(row.amount));
   }
 
   return { labels, values };
 }
 
-export function appointmentsByMonthForYear(year) {
+export async function appointmentsByMonthForYear(year) {
   const labels = [];
   const values = [];
 
   for (let month = 1; month <= 12; month += 1) {
     const ym = `${year}-${String(month).padStart(2, "0")}`;
 
-    const count = db
+    const row = await db
       .prepare(
         `SELECT COUNT(*) AS n FROM appointments
           WHERE substr(appointment_date, 1, 7) = ? AND status != 'cancelled'`
       )
-      .get(ym).n;
+      .get(ym);
 
     labels.push(MONTH_NAMES[month - 1]);
-    values.push(count);
+    values.push(row.n);
   }
 
   return { labels, values };
@@ -442,7 +452,7 @@ function shiftDays(iso, days) {
  * was empty — "up 100%" from nothing is a claim the data does not
  * support, and the UI should say "no prior data" instead.
  */
-export function periodComparison(from, to) {
+export async function periodComparison(from, to) {
   const spanDays =
     Math.round(
       (new Date(`${to}T00:00:00`) - new Date(`${from}T00:00:00`)) / 86_400_000
@@ -451,8 +461,8 @@ export function periodComparison(from, to) {
   const previousTo = shiftDays(from, -1);
   const previousFrom = shiftDays(previousTo, -(spanDays - 1));
 
-  const current = periodTotals.get({ from, to });
-  const previous = periodTotals.get({ from: previousFrom, to: previousTo });
+  const current = await periodTotals.get({ from, to });
+  const previous = await periodTotals.get({ from: previousFrom, to: previousTo });
 
   const metrics = {};
 
@@ -475,8 +485,8 @@ export function periodComparison(from, to) {
   };
 }
 
-export function appointmentStatusBreakdown() {
-  const rows = db
+export async function appointmentStatusBreakdown() {
+  const rows = await db
     .prepare(
       `SELECT status AS label, COUNT(*) AS value
          FROM appointments GROUP BY status ORDER BY value DESC`
@@ -489,8 +499,8 @@ export function appointmentStatusBreakdown() {
   };
 }
 
-export function doctorUtilisation(limit = 8) {
-  const rows = db
+export async function doctorUtilisation(limit = 8) {
+  const rows = await db
     .prepare(
       `SELECT d.name AS label, COUNT(a.id) AS value
          FROM doctors d
@@ -511,8 +521,8 @@ export function doctorUtilisation(limit = 8) {
   };
 }
 
-export function recentActivity(limit = 8) {
-  return db
+export async function recentActivity(limit = 8) {
+  const rows = await db
     .prepare(
       `SELECT a.id, a.appointment_date, a.appointment_time, a.status,
               d.name AS doctor_name,
@@ -524,32 +534,34 @@ export function recentActivity(limit = 8) {
         ORDER BY a.created_at DESC, a.id DESC
         LIMIT ?`
     )
-    .all(limit)
-    .map((row) => ({
-      id: row.id,
-      patient: row.patient_name,
-      doctor: row.doctor_name,
-      date: row.appointment_date,
-      time: row.appointment_time,
-      status: row.status,
-    }));
+    .all(limit);
+
+  return rows.map((row) => ({
+    id: row.id,
+    patient: row.patient_name,
+    doctor: row.doctor_name,
+    date: row.appointment_date,
+    time: row.appointment_time,
+    status: row.status,
+  }));
 }
 
-export function adminDashboard() {
+export async function adminDashboard() {
+  const markedDatesRows = await db
+    .prepare(
+      `SELECT DISTINCT appointment_date AS date FROM appointments
+        WHERE status IN ('pending','scheduled','confirmed','rescheduled')`
+    )
+    .all();
+
   return {
-    overview: adminOverview(),
-    revenueTrend: revenueTrend(7),
-    patientsByDepartment: patientsByDepartment(),
-    appointmentsByDay: appointmentsByDay(7),
-    appointmentStatus: appointmentStatusBreakdown(),
-    doctorUtilisation: doctorUtilisation(6),
-    recentActivity: recentActivity(6),
-    markedDates: db
-      .prepare(
-        `SELECT DISTINCT appointment_date AS date FROM appointments
-          WHERE status IN ('pending','scheduled','confirmed','rescheduled')`
-      )
-      .all()
-      .map((row) => row.date),
+    overview: await adminOverview(),
+    revenueTrend: await revenueTrend(7),
+    patientsByDepartment: await patientsByDepartment(),
+    appointmentsByDay: await appointmentsByDay(7),
+    appointmentStatus: await appointmentStatusBreakdown(),
+    doctorUtilisation: await doctorUtilisation(6),
+    recentActivity: await recentActivity(6),
+    markedDates: markedDatesRows.map((row) => row.date),
   };
 }

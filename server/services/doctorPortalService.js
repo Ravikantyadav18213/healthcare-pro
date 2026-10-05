@@ -9,7 +9,7 @@ import {
   publicPrescription,
 } from "../utils/sanitize.js";
 import { today, nowTime } from "../utils/time.js";
-import { emitToAdmins } from "../sockets/index.js";
+import { emitToAdmins } from "../utils/realtime.js";
 
 /* ==================================================================
    DOCTOR PORTAL
@@ -27,8 +27,8 @@ import { emitToAdmins } from "../sockets/index.js";
  * operation (seeding links them), but is treated as a hard failure
  * rather than silently granting broad access.
  */
-export function resolveDoctor(userId) {
-  const row = db
+export async function resolveDoctor(userId) {
+  const row = await db
     .prepare(
       `SELECT d.*, dep.name AS department_name
          FROM doctors d
@@ -54,8 +54,8 @@ export function resolveDoctor(userId) {
  *   3. has an admin-approved chat relationship with that patient.
  * Anything else is 403, regardless of what the frontend renders.
  */
-function isAuthorizedForPatient(doctorId, doctorUserId, patientId) {
-  const row = db
+async function isAuthorizedForPatient(doctorId, doctorUserId, patientId) {
+  const row = await db
     .prepare(
       `SELECT 1
          FROM patients p
@@ -91,11 +91,11 @@ const SELECT_PATIENT = `
 `;
 
 /** Loads the patient row and throws 403 unless the relationship checks out. */
-export function assertAuthorizedPatient(doctor, patientId) {
-  const row = db.prepare(`${SELECT_PATIENT} WHERE p.id = ?`).get(Number(patientId));
+export async function assertAuthorizedPatient(doctor, patientId) {
+  const row = await db.prepare(`${SELECT_PATIENT} WHERE p.id = ?`).get(Number(patientId));
   if (!row) throw ApiError.notFound("Patient not found.");
 
-  if (!isAuthorizedForPatient(doctor.id, doctor.user_id, row.id)) {
+  if (!(await isAuthorizedForPatient(doctor.id, doctor.user_id, row.id))) {
     throw ApiError.forbidden("Access to this patient is not authorized.");
   }
 
@@ -106,25 +106,27 @@ export function assertAuthorizedPatient(doctor, patientId) {
    DASHBOARD STATS
 ================================================================== */
 
-export function dashboardStats(doctor) {
-  const patientCount = db
-    .prepare(
-      `SELECT COUNT(DISTINCT p.id) AS n
-         FROM patients p
-        WHERE p.doctor_id = @doctorId
-           OR EXISTS (SELECT 1 FROM appointments a WHERE a.patient_id = p.id AND a.doctor_id = @doctorId)
-           OR (
-             p.user_id IS NOT NULL
-             AND EXISTS (
-               SELECT 1 FROM chat_conversations c
-                WHERE c.patient_id = p.user_id AND c.doctor_id = @doctorUserId
-                  AND c.type = 'patient_doctor' AND c.status = 'active'
-             )
-           )`
-    )
-    .get({ doctorId: doctor.id, doctorUserId: doctor.user_id }).n;
+export async function dashboardStats(doctor) {
+  const patientCount = (
+    await db
+      .prepare(
+        `SELECT COUNT(DISTINCT p.id) AS n
+           FROM patients p
+          WHERE p.doctor_id = @doctorId
+             OR EXISTS (SELECT 1 FROM appointments a WHERE a.patient_id = p.id AND a.doctor_id = @doctorId)
+             OR (
+               p.user_id IS NOT NULL
+               AND EXISTS (
+                 SELECT 1 FROM chat_conversations c
+                  WHERE c.patient_id = p.user_id AND c.doctor_id = @doctorUserId
+                    AND c.type = 'patient_doctor' AND c.status = 'active'
+               )
+             )`
+      )
+      .get({ doctorId: doctor.id, doctorUserId: doctor.user_id })
+  ).n;
 
-  const appt = db
+  const appt = await db
     .prepare(
       `SELECT
          SUM(CASE WHEN appointment_date = @today
@@ -139,15 +141,17 @@ export function dashboardStats(doctor) {
     )
     .get({ today: today(), doctorId: doctor.id });
 
-  const unreadMessages = db
-    .prepare(
-      `SELECT COUNT(*) AS n
-         FROM chat_messages m
-         JOIN chat_conversations c ON c.id = m.conversation_id
-        WHERE c.type = 'patient_doctor' AND c.doctor_id = ?
-          AND m.sender_id != ? AND m.is_read = 0`
-    )
-    .get(doctor.user_id, doctor.user_id).n;
+  const unreadMessages = (
+    await db
+      .prepare(
+        `SELECT COUNT(*) AS n
+           FROM chat_messages m
+           JOIN chat_conversations c ON c.id = m.conversation_id
+          WHERE c.type = 'patient_doctor' AND c.doctor_id = ?
+            AND m.sender_id != ? AND m.is_read = 0`
+      )
+      .get(doctor.user_id, doctor.user_id)
+  ).n;
 
   return {
     myPatients: patientCount || 0,
@@ -179,7 +183,7 @@ const SELECT_APPOINTMENT = `
     LEFT JOIN users       u   ON u.id  = a.user_id
 `;
 
-export function listMyAppointments(doctor, { scope = "", status = "", search = "" } = {}) {
+export async function listMyAppointments(doctor, { scope = "", status = "", search = "" } = {}) {
   const where = ["a.doctor_id = @doctorId"];
   const params = { doctorId: doctor.id, today: today(), now: nowTime() };
 
@@ -204,7 +208,7 @@ export function listMyAppointments(doctor, { scope = "", status = "", search = "
     params.search = `%${search}%`;
   }
 
-  const rows = db
+  const rows = await db
     .prepare(
       `${SELECT_APPOINTMENT}
         WHERE ${where.join(" AND ")}
@@ -215,17 +219,17 @@ export function listMyAppointments(doctor, { scope = "", status = "", search = "
   return rows.map(publicAppointment);
 }
 
-export function todaysAppointments(doctor) {
+export async function todaysAppointments(doctor) {
   return listMyAppointments(doctor, { scope: "today" });
 }
 
-export function upcomingAppointments(doctor) {
+export async function upcomingAppointments(doctor) {
   return listMyAppointments(doctor, { scope: "upcoming" });
 }
 
 /** Ownership check reused by the completion/notes endpoints. */
-function getOwnedAppointment(doctor, appointmentId) {
-  const row = db
+async function getOwnedAppointment(doctor, appointmentId) {
+  const row = await db
     .prepare(`${SELECT_APPOINTMENT} WHERE a.id = ?`)
     .get(Number(appointmentId));
 
@@ -237,8 +241,8 @@ function getOwnedAppointment(doctor, appointmentId) {
   return row;
 }
 
-export function markAppointmentCompleted(doctor, appointmentId) {
-  const row = getOwnedAppointment(doctor, appointmentId);
+export async function markAppointmentCompleted(doctor, appointmentId) {
+  const row = await getOwnedAppointment(doctor, appointmentId);
 
   if (row.status === "completed") {
     throw ApiError.conflict("This appointment is already marked completed.");
@@ -247,21 +251,21 @@ export function markAppointmentCompleted(doctor, appointmentId) {
     throw ApiError.conflict("A cancelled appointment cannot be completed.");
   }
 
-  db.prepare(
+  await db.prepare(
     `UPDATE appointments SET status = 'completed', updated_at = datetime('now') WHERE id = ?`
   ).run(row.id);
 
-  notify(row.user_id, {
+  await notify(row.user_id, {
     title: "Visit completed",
     message: `Your visit with ${row.doctor_name} is complete. Any reports will appear under My Reports.`,
     type: "success",
     link: "/my-appointments",
   });
 
-  emitToAdmins("dashboard:stats-changed", { source: "appointments" });
+  await emitToAdmins("dashboard:stats-changed", { source: "appointments" });
 
   return publicAppointment(
-    db.prepare(`${SELECT_APPOINTMENT} WHERE a.id = ?`).get(row.id)
+    await db.prepare(`${SELECT_APPOINTMENT} WHERE a.id = ?`).get(row.id)
   );
 }
 
@@ -269,7 +273,7 @@ export function markAppointmentCompleted(doctor, appointmentId) {
    PATIENTS
 ================================================================== */
 
-export function listMyPatients(doctor, { search = "", status = "" } = {}) {
+export async function listMyPatients(doctor, { search = "", status = "" } = {}) {
   const where = [
     `(
       p.doctor_id = @doctorId
@@ -297,7 +301,7 @@ export function listMyPatients(doctor, { search = "", status = "" } = {}) {
     params.status = status;
   }
 
-  const rows = db
+  const rows = await db
     .prepare(
       `${SELECT_PATIENT}
         WHERE ${where.join(" AND ")}
@@ -318,23 +322,25 @@ export function listMyPatients(doctor, { search = "", status = "" } = {}) {
       ORDER BY appointment_date ASC, appointment_time ASC LIMIT 1`
   );
 
-  return rows.map((row) => {
-    const last = lastVisitStmt.get(row.id, doctor.id);
-    const next = nextApptStmt.get(row.id, doctor.id, today());
+  return Promise.all(
+    rows.map(async (row) => {
+      const last = await lastVisitStmt.get(row.id, doctor.id);
+      const next = await nextApptStmt.get(row.id, doctor.id, today());
 
-    return {
-      ...publicPatient(row),
-      lastVisit: last?.d || null,
-      nextAppointment: next
-        ? { date: next.appointment_date, time: next.appointment_time }
-        : null,
-    };
-  });
+      return {
+        ...publicPatient(row),
+        lastVisit: last?.d || null,
+        nextAppointment: next
+          ? { date: next.appointment_date, time: next.appointment_time }
+          : null,
+      };
+    })
+  );
 }
 
 /** Every report belonging to a patient this doctor is authorized for. */
-export function listMyReports(doctor) {
-  const rows = db
+export async function listMyReports(doctor) {
+  const rows = await db
     .prepare(
       `SELECT r.*, u.name AS owner_name, u.email AS owner_email,
               p.name AS patient_display_name
@@ -359,8 +365,8 @@ export function listMyReports(doctor) {
 }
 
 /** Every prescription this doctor has personally issued. */
-export function listMyPrescriptions(doctor) {
-  const rows = db
+export async function listMyPrescriptions(doctor) {
+  const rows = await db
     .prepare(
       `SELECT rx.*, d.name AS doctor_name, p.name AS patient_display_name
          FROM prescriptions rx
@@ -377,8 +383,8 @@ export function listMyPrescriptions(doctor) {
   }));
 }
 
-export function getPatientForDoctor(doctor, patientId) {
-  const row = assertAuthorizedPatient(doctor, patientId);
+export async function getPatientForDoctor(doctor, patientId) {
+  const row = await assertAuthorizedPatient(doctor, patientId);
 
   /*
    * The admin should know a doctor opened a patient's chart — not just
@@ -387,7 +393,7 @@ export function getPatientForDoctor(doctor, patientId) {
    * (the frontend loads a patient's detail page only on mount), not on
    * every re-render, so this stays useful rather than noisy.
    */
-  notifyAdmins({
+  await notifyAdmins({
     title: "Doctor viewed a patient record",
     message: `${doctor.name} viewed ${row.name}'s patient record (#${row.id}). Review their reports and billing if needed.`,
     type: "info",
@@ -397,10 +403,10 @@ export function getPatientForDoctor(doctor, patientId) {
   return publicPatient(row);
 }
 
-export function getPatientHistory(doctor, patientId) {
-  assertAuthorizedPatient(doctor, patientId);
+export async function getPatientHistory(doctor, patientId) {
+  await assertAuthorizedPatient(doctor, patientId);
 
-  const rows = db
+  const rows = await db
     .prepare(
       `SELECT h.*, d.name AS doctor_name
          FROM medical_history h
@@ -413,10 +419,10 @@ export function getPatientHistory(doctor, patientId) {
   return rows.map(publicMedicalHistoryEntry);
 }
 
-export function getPatientReports(doctor, patientId) {
-  const patient = assertAuthorizedPatient(doctor, patientId);
+export async function getPatientReports(doctor, patientId) {
+  const patient = await assertAuthorizedPatient(doctor, patientId);
 
-  const rows = db
+  const rows = await db
     .prepare(
       `SELECT r.*, u.name AS owner_name, u.email AS owner_email
          FROM reports r
@@ -429,10 +435,10 @@ export function getPatientReports(doctor, patientId) {
   return rows.map(publicReport);
 }
 
-export function getPatientPrescriptions(doctor, patientId) {
-  assertAuthorizedPatient(doctor, patientId);
+export async function getPatientPrescriptions(doctor, patientId) {
+  await assertAuthorizedPatient(doctor, patientId);
 
-  const rows = db
+  const rows = await db
     .prepare(
       `SELECT rx.*, d.name AS doctor_name
          FROM prescriptions rx
@@ -445,10 +451,10 @@ export function getPatientPrescriptions(doctor, patientId) {
   return rows.map(publicPrescription);
 }
 
-export function getPatientAppointments(doctor, patientId) {
-  assertAuthorizedPatient(doctor, patientId);
+export async function getPatientAppointments(doctor, patientId) {
+  await assertAuthorizedPatient(doctor, patientId);
 
-  const rows = db
+  const rows = await db
     .prepare(
       `${SELECT_APPOINTMENT}
         WHERE a.patient_id = ? AND a.doctor_id = ?
@@ -470,8 +476,8 @@ const insertHistory = db.prepare(`
     (@patient_id, @doctor_id, @appointment_id, @diagnosis, @symptoms, @treatment, @notes, @follow_up_date)
 `);
 
-export function createNote(doctor, patientId, payload) {
-  const patient = assertAuthorizedPatient(doctor, patientId);
+export async function createNote(doctor, patientId, payload) {
+  const patient = await assertAuthorizedPatient(doctor, patientId);
 
   const hasContent = [
     payload.diagnosis,
@@ -485,13 +491,13 @@ export function createNote(doctor, patientId, payload) {
   }
 
   if (payload.appointmentId) {
-    const appt = db
+    const appt = await db
       .prepare(`SELECT id FROM appointments WHERE id = ? AND patient_id = ? AND doctor_id = ?`)
       .get(Number(payload.appointmentId), patient.id, doctor.id);
     if (!appt) throw ApiError.badRequest("That appointment does not belong to this patient.");
   }
 
-  const result = insertHistory.run({
+  const result = await insertHistory.run({
     patient_id: patient.id,
     doctor_id: doctor.id,
     appointment_id: payload.appointmentId ? Number(payload.appointmentId) : null,
@@ -502,7 +508,7 @@ export function createNote(doctor, patientId, payload) {
     follow_up_date: payload.followUpDate || null,
   });
 
-  const created = db
+  const created = await db
     .prepare(
       `SELECT h.*, d.name AS doctor_name FROM medical_history h
         LEFT JOIN doctors d ON d.id = h.doctor_id WHERE h.id = ?`
@@ -510,7 +516,7 @@ export function createNote(doctor, patientId, payload) {
     .get(result.lastInsertRowid);
 
   if (patient.user_id) {
-    notify(patient.user_id, {
+    await notify(patient.user_id, {
       title: "New note from your doctor",
       message: `${doctor.name} added a clinical note to your record.`,
       type: "info",
@@ -528,15 +534,15 @@ const insertPrescription = db.prepare(`
     (@patient_id, @doctor_id, @medicine, @dosage, @frequency, @duration, @instructions)
 `);
 
-export function createPrescription(doctor, patientId, payload) {
-  const patient = assertAuthorizedPatient(doctor, patientId);
+export async function createPrescription(doctor, patientId, payload) {
+  const patient = await assertAuthorizedPatient(doctor, patientId);
 
   const medicine = String(payload.medicine || "").trim();
   if (!medicine) {
     throw ApiError.validation({ medicine: "Medicine name is required." });
   }
 
-  const result = insertPrescription.run({
+  const result = await insertPrescription.run({
     patient_id: patient.id,
     doctor_id: doctor.id,
     medicine,
@@ -546,7 +552,7 @@ export function createPrescription(doctor, patientId, payload) {
     instructions: payload.instructions ? String(payload.instructions).trim() : null,
   });
 
-  const created = db
+  const created = await db
     .prepare(
       `SELECT rx.*, d.name AS doctor_name FROM prescriptions rx
         LEFT JOIN doctors d ON d.id = rx.doctor_id WHERE rx.id = ?`
@@ -554,7 +560,7 @@ export function createPrescription(doctor, patientId, payload) {
     .get(result.lastInsertRowid);
 
   if (patient.user_id) {
-    notify(patient.user_id, {
+    await notify(patient.user_id, {
       title: "New prescription",
       message: `${doctor.name} prescribed ${medicine}. View it under My Reports.`,
       type: "success",
@@ -595,8 +601,8 @@ export function getOwnProfile(doctor) {
  * never role, fee, department or account status. Those stay
  * administrator-controlled via the existing /api/doctors endpoints.
  */
-export function updateOwnProfile(doctor, payload) {
-  db.prepare(
+export async function updateOwnProfile(doctor, payload) {
+  await db.prepare(
     `UPDATE doctors
         SET phone = @phone, bio = @bio, availability = @availability,
             updated_at = datetime('now')
@@ -608,7 +614,7 @@ export function updateOwnProfile(doctor, payload) {
     availability: payload.availability || doctor.availability,
   });
 
-  const updated = db
+  const updated = await db
     .prepare(
       `SELECT d.*, dep.name AS department_name FROM doctors d
         LEFT JOIN departments dep ON dep.id = d.department_id WHERE d.id = ?`

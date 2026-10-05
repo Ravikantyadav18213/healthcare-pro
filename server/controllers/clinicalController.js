@@ -23,14 +23,14 @@ import { buildDischargePdf, buildPrescriptionPdf, buildReportPdf } from "../util
 ------------------------------------------------------------------ */
 
 export const patientTimeline = asyncHandler(async (req, res) => {
-  const scope = timeline.resolvePatientScope(req.user, req.query.patientId ?? req.params.patientId);
+  const scope = await timeline.resolvePatientScope(req.user, req.query.patientId ?? req.params.patientId);
 
   const kinds = String(req.query.kinds || "")
     .split(",")
     .map((kind) => kind.trim())
     .filter(Boolean);
 
-  const result = timeline.buildTimeline(scope, { kinds });
+  const result = await timeline.buildTimeline(scope, { kinds });
 
   res.json({
     success: true,
@@ -48,8 +48,8 @@ export const listWards = asyncHandler(async (req, res) => {
 
   res.json({
     success: true,
-    wards: wards.listWards({ assignedWardId }),
-    stats: wards.wardStats({ assignedWardId }),
+    wards: await wards.listWards({ assignedWardId }),
+    stats: await wards.wardStats({ assignedWardId }),
   });
 });
 
@@ -58,32 +58,32 @@ export const listBeds = asyncHandler(async (req, res) => {
 
   res.json({
     success: true,
-    beds: wards.listBeds({ wardId: req.query.wardId, status: req.query.status, assignedWardId }),
+    beds: await wards.listBeds({ wardId: req.query.wardId, status: req.query.status, assignedWardId }),
   });
 });
 
 export const createWard = asyncHandler(async (req, res) => {
   validate(req.body || {}, { name: rules.string({ min: 2, max: 80, label: "Ward name" }) });
 
-  const ward = wards.createWard(req.body);
+  const ward = await wards.createWard(req.body);
 
-  audit(req, "ward_created", { entity: "ward", entityId: ward.id, details: ward.name });
+  await audit(req, "ward_created", { entity: "ward", entityId: ward.id, details: ward.name });
 
   res.status(201).json({ success: true, ward });
 });
 
 export const updateWard = asyncHandler(async (req, res) => {
-  const ward = wards.updateWard(Number(req.params.id), req.body || {});
+  const ward = await wards.updateWard(Number(req.params.id), req.body || {});
 
-  audit(req, "ward_updated", { entity: "ward", entityId: ward.id, details: ward.name });
+  await audit(req, "ward_updated", { entity: "ward", entityId: ward.id, details: ward.name });
 
   res.json({ success: true, ward });
 });
 
 export const removeWard = asyncHandler(async (req, res) => {
-  const result = wards.removeWard(Number(req.params.id));
+  const result = await wards.removeWard(Number(req.params.id));
 
-  audit(req, "ward_deleted", { entity: "ward", entityId: result.id });
+  await audit(req, "ward_deleted", { entity: "ward", entityId: result.id });
 
   res.json({ success: true });
 });
@@ -95,9 +95,9 @@ export const createBed = asyncHandler(async (req, res) => {
 
   /* A range creates many beds at once; a label creates exactly one. */
   if (from != null && to != null) {
-    const result = wards.createBedRange({ wardId, prefix, from, to });
+    const result = await wards.createBedRange({ wardId, prefix, from, to });
 
-    audit(req, "beds_created", {
+    await audit(req, "beds_created", {
       entity: "ward",
       entityId: Number(wardId),
       details: `${result.added} bed(s) added`,
@@ -108,25 +108,25 @@ export const createBed = asyncHandler(async (req, res) => {
 
   validate(req.body || {}, { label: rules.string({ min: 1, max: 40, label: "Bed label" }) });
 
-  const bed = wards.createBed({ wardId, label, status: req.body.status, notes: req.body.notes });
+  const bed = await wards.createBed({ wardId, label, status: req.body.status, notes: req.body.notes });
 
-  audit(req, "bed_created", { entity: "bed", entityId: bed.id, details: bed.label });
+  await audit(req, "bed_created", { entity: "bed", entityId: bed.id, details: bed.label });
 
   res.status(201).json({ success: true, bed });
 });
 
 export const updateBed = asyncHandler(async (req, res) => {
-  const bed = wards.updateBed(Number(req.params.id), req.body || {});
+  const bed = await wards.updateBed(Number(req.params.id), req.body || {});
 
-  audit(req, "bed_updated", { entity: "bed", entityId: bed.id, details: `${bed.label} → ${bed.status}` });
+  await audit(req, "bed_updated", { entity: "bed", entityId: bed.id, details: `${bed.label} → ${bed.status}` });
 
   res.json({ success: true, bed });
 });
 
 export const removeBed = asyncHandler(async (req, res) => {
-  const result = wards.removeBed(Number(req.params.id));
+  const result = await wards.removeBed(Number(req.params.id));
 
-  audit(req, "bed_deleted", { entity: "bed", entityId: result.id });
+  await audit(req, "bed_deleted", { entity: "bed", entityId: result.id });
 
   res.json({ success: true });
 });
@@ -136,9 +136,9 @@ export const assignBed = asyncHandler(async (req, res) => {
 
   if (!patientId) throw ApiError.badRequest("A patient is required.");
 
-  const bed = wards.assignBed({ bedId: Number(req.params.id), patientId });
+  const bed = await wards.assignBed({ bedId: Number(req.params.id), patientId });
 
-  audit(req, "bed_assigned", {
+  await audit(req, "bed_assigned", {
     entity: "bed",
     entityId: bed.id,
     details: `patient ${patientId} → ${bed.label}`,
@@ -148,9 +148,9 @@ export const assignBed = asyncHandler(async (req, res) => {
 });
 
 export const releaseBed = asyncHandler(async (req, res) => {
-  const bed = wards.releaseBed(Number(req.params.id));
+  const bed = await wards.releaseBed(Number(req.params.id));
 
-  audit(req, "bed_released", { entity: "bed", entityId: bed.id, details: bed.label });
+  await audit(req, "bed_released", { entity: "bed", entityId: bed.id, details: bed.label });
 
   res.json({ success: true, bed });
 });
@@ -163,8 +163,8 @@ export const listDischarges = asyncHandler(async (req, res) => {
   /* A patient sees only their own; staff may filter by patient. */
   const summaries =
     req.user.role === "user"
-      ? discharge.listForUser(req.user.id)
-      : discharge.listSummaries({ patientId: req.query.patientId });
+      ? await discharge.listForUser(req.user.id)
+      : await discharge.listSummaries({ patientId: req.query.patientId });
 
   res.json({ success: true, summaries });
 });
@@ -175,12 +175,12 @@ export const createDischarge = asyncHandler(async (req, res) => {
     dischargedOn: rules.date({ label: "Discharge date" }),
   });
 
-  const summary = discharge.createSummary({
+  const summary = await discharge.createSummary({
     ...req.body,
     createdBy: req.user.id,
   });
 
-  audit(req, "discharge_summary_created", {
+  await audit(req, "discharge_summary_created", {
     entity: "patient",
     entityId: summary.patientId,
     details: `${summary.patientName} discharged ${summary.dischargedOn}`,
@@ -190,9 +190,9 @@ export const createDischarge = asyncHandler(async (req, res) => {
 });
 
 export const updateDischarge = asyncHandler(async (req, res) => {
-  const summary = discharge.updateSummary(Number(req.params.id), req.body || {});
+  const summary = await discharge.updateSummary(Number(req.params.id), req.body || {});
 
-  audit(req, "discharge_summary_updated", {
+  await audit(req, "discharge_summary_updated", {
     entity: "patient",
     entityId: summary.patientId,
   });
@@ -201,9 +201,9 @@ export const updateDischarge = asyncHandler(async (req, res) => {
 });
 
 export const removeDischarge = asyncHandler(async (req, res) => {
-  discharge.removeSummary(Number(req.params.id));
+  await discharge.removeSummary(Number(req.params.id));
 
-  audit(req, "discharge_summary_deleted", { entity: "discharge", entityId: Number(req.params.id) });
+  await audit(req, "discharge_summary_deleted", { entity: "discharge", entityId: Number(req.params.id) });
 
   res.json({ success: true });
 });
@@ -216,10 +216,10 @@ export const removeDischarge = asyncHandler(async (req, res) => {
    builders, which know nothing about who is asking.
 ------------------------------------------------------------------ */
 
-function assertOwnPatient(req, patientUserId, patientId) {
+async function assertOwnPatient(req, patientUserId, patientId) {
   if (req.user.role !== "user") return;
 
-  const own = db.prepare(`SELECT id FROM patients WHERE user_id = ?`).get(req.user.id);
+  const own = await db.prepare(`SELECT id FROM patients WHERE user_id = ?`).get(req.user.id);
 
   const matchesRecord = own && Number(own.id) === Number(patientId);
   const matchesLogin = patientUserId && Number(patientUserId) === Number(req.user.id);
@@ -267,10 +267,10 @@ export const prescriptionPdf = asyncHandler(async (req, res) => {
   const single = req.query.single === "1" || req.params.id;
 
   if (single && req.params.id) {
-    const row = onePrescription.get(Number(req.params.id));
+    const row = await onePrescription.get(Number(req.params.id));
     if (!row) throw ApiError.notFound("Prescription not found.");
 
-    assertOwnPatient(req, row.patientUserId, row.patientId);
+    await assertOwnPatient(req, row.patientUserId, row.patientId);
 
     buildPrescriptionPdf(sendPdf(res, `prescription-${row.id}.pdf`), {
       ...row,
@@ -282,11 +282,11 @@ export const prescriptionPdf = asyncHandler(async (req, res) => {
   }
 
   const patientId = Number(req.params.patientId || req.query.patientId);
-  const rows = prescriptionRows.all(patientId);
+  const rows = await prescriptionRows.all(patientId);
 
   if (rows.length === 0) throw ApiError.notFound("No prescriptions found for this patient.");
 
-  assertOwnPatient(req, rows[0].patientUserId, patientId);
+  await assertOwnPatient(req, rows[0].patientUserId, patientId);
 
   buildPrescriptionPdf(sendPdf(res, `prescriptions-PT-${patientId}.pdf`), {
     ...rows[0],
@@ -296,13 +296,15 @@ export const prescriptionPdf = asyncHandler(async (req, res) => {
 });
 
 export const dischargePdf = asyncHandler(async (req, res) => {
-  const summary = discharge.getSummary(Number(req.params.id));
+  const summary = await discharge.getSummary(Number(req.params.id));
 
-  const patientUserId = db
-    .prepare(`SELECT user_id AS userId FROM patients WHERE id = ?`)
-    .get(summary.patientId)?.userId;
+  const patientUserId = (
+    await db
+      .prepare(`SELECT user_id AS userId FROM patients WHERE id = ?`)
+      .get(summary.patientId)
+  )?.userId;
 
-  assertOwnPatient(req, patientUserId, summary.patientId);
+  await assertOwnPatient(req, patientUserId, summary.patientId);
 
   buildDischargePdf(sendPdf(res, `discharge-summary-${summary.id}.pdf`), summary);
 });
@@ -324,10 +326,10 @@ const oneReport = db.prepare(`
 `);
 
 export const reportPdf = asyncHandler(async (req, res) => {
-  const row = oneReport.get(Number(req.params.id));
+  const row = await oneReport.get(Number(req.params.id));
   if (!row) throw ApiError.notFound("Report not found.");
 
-  assertOwnPatient(req, row.patientUserId, row.patientId);
+  await assertOwnPatient(req, row.patientUserId, row.patientId);
 
   buildReportPdf(sendPdf(res, `report-RPT-${row.id}.pdf`), row);
 });
@@ -343,7 +345,7 @@ export const paymentStatus = asyncHandler(async (_req, res) => {
 export const createPaymentOrder = asyncHandler(async (req, res) => {
   const order = await payments.createOrder(req.params.id, req.user);
 
-  audit(req, "payment_order_created", {
+  await audit(req, "payment_order_created", {
     entity: "invoice",
     entityId: Number(req.params.id),
     details: `order ${order.orderId}`,
@@ -355,13 +357,13 @@ export const createPaymentOrder = asyncHandler(async (req, res) => {
 export const verifyPayment = asyncHandler(async (req, res) => {
   const { orderId, paymentId, signature } = req.body || {};
 
-  const result = payments.verifyPayment(
+  const result = await payments.verifyPayment(
     { invoiceId: req.params.id, orderId, paymentId, signature },
     req.user
   );
 
   if (!result.alreadyPaid) {
-    audit(req, "invoice_paid_online", {
+    await audit(req, "invoice_paid_online", {
       entity: "invoice",
       entityId: Number(req.params.id),
       details: `payment ${paymentId}`,
@@ -372,9 +374,9 @@ export const verifyPayment = asyncHandler(async (req, res) => {
 });
 
 export const collectPaymentAtCounter = asyncHandler(async (req, res) => {
-  const invoice = payments.recordCounterPayment(req.params.id, req.body?.method, req.user);
+  const invoice = await payments.recordCounterPayment(req.params.id, req.body?.method, req.user);
 
-  audit(req, "invoice_paid_counter", {
+  await audit(req, "invoice_paid_counter", {
     entity: "invoice",
     entityId: Number(req.params.id),
     details: `${req.body?.method} — ${invoice.invoiceNo}`,
@@ -388,15 +390,15 @@ export const collectPaymentAtCounter = asyncHandler(async (req, res) => {
 ------------------------------------------------------------------ */
 
 export const videoJoinInfo = asyncHandler(async (req, res) => {
-  res.json({ success: true, call: video.getJoinInfo(req.params.id, req.user) });
+  res.json({ success: true, call: await video.getJoinInfo(req.params.id, req.user) });
 });
 
 export const setAppointmentMode = asyncHandler(async (req, res) => {
   const mode = req.body?.mode === "video" ? "video" : "in_person";
 
-  const appointment = video.setAppointmentMode(req.params.id, mode, req.user);
+  const appointment = await video.setAppointmentMode(req.params.id, mode, req.user);
 
-  audit(req, "appointment_mode_changed", {
+  await audit(req, "appointment_mode_changed", {
     entity: "appointment",
     entityId: Number(req.params.id),
     details: `mode → ${mode}`,

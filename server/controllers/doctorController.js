@@ -10,30 +10,30 @@ export const list = asyncHandler(async (req, res) => {
 
   res.json({
     success: true,
-    doctors: doctors.listDoctors({
+    doctors: await doctors.listDoctors({
       search: req.query.search || "",
       specialization: req.query.specialization || "",
       departmentId: req.query.departmentId || null,
       status: req.query.status || "",
       includeInactive,
     }),
-    specializations: doctors.listSpecializations(),
+    specializations: await doctors.listSpecializations(),
   });
 });
 
 export const getOne = asyncHandler(async (req, res) => {
-  res.json({ success: true, doctor: doctors.getDoctor(req.params.id) });
+  res.json({ success: true, doctor: await doctors.getDoctor(req.params.id) });
 });
 
 export const availability = asyncHandler(async (req, res) => {
   res.json({
     success: true,
-    ...doctors.getAvailableSlots(req.params.id, req.query.date),
+    ...(await doctors.getAvailableSlots(req.params.id, req.query.date)),
   });
 });
 
 export const schedule = asyncHandler(async (req, res) => {
-  res.json({ success: true, schedule: doctors.getDoctorSchedule(req.params.id) });
+  res.json({ success: true, schedule: await doctors.getDoctorSchedule(req.params.id) });
 });
 
 /* ==================================================================
@@ -62,9 +62,9 @@ const doctorSchema = {
 export const create = asyncHandler(async (req, res) => {
   validate(req.body || {}, doctorSchema);
 
-  const doctor = doctors.createDoctor(req.body);
+  const doctor = await doctors.createDoctor(req.body);
 
-  audit(req, "doctor_created", {
+  await audit(req, "doctor_created", {
     entity: "doctor",
     entityId: doctor.id,
     details: `Added doctor ${doctor.name} (${doctor.specialization}).`,
@@ -76,9 +76,9 @@ export const create = asyncHandler(async (req, res) => {
 export const update = asyncHandler(async (req, res) => {
   validate(req.body || {}, doctorSchema);
 
-  const doctor = doctors.updateDoctor(req.params.id, req.body);
+  const doctor = await doctors.updateDoctor(req.params.id, req.body);
 
-  audit(req, "doctor_updated", {
+  await audit(req, "doctor_updated", {
     entity: "doctor",
     entityId: doctor.id,
     details: `Updated doctor ${doctor.name}.`,
@@ -92,9 +92,9 @@ export const setStatus = asyncHandler(async (req, res) => {
     status: rules.oneOf(["active", "inactive"], { label: "Status" }),
   });
 
-  const doctor = doctors.setDoctorStatus(req.params.id, req.body.status);
+  const doctor = await doctors.setDoctorStatus(req.params.id, req.body.status);
 
-  audit(req, "doctor_status_changed", {
+  await audit(req, "doctor_status_changed", {
     entity: "doctor",
     entityId: doctor.id,
     details: `${doctor.name} set to ${doctor.status}.`,
@@ -104,9 +104,9 @@ export const setStatus = asyncHandler(async (req, res) => {
 });
 
 export const remove = asyncHandler(async (req, res) => {
-  const removed = doctors.deleteDoctor(req.params.id);
+  const removed = await doctors.deleteDoctor(req.params.id);
 
-  audit(req, "doctor_deleted", {
+  await audit(req, "doctor_deleted", {
     entity: "doctor",
     entityId: removed.id,
     details: `Deleted doctor ${removed.name}.`,
@@ -118,9 +118,9 @@ export const remove = asyncHandler(async (req, res) => {
 export const setSchedule = asyncHandler(async (req, res) => {
   const windows = Array.isArray(req.body?.windows) ? req.body.windows : [];
 
-  const updated = doctors.replaceDoctorSchedule(req.params.id, windows);
+  const updated = await doctors.replaceDoctorSchedule(req.params.id, windows);
 
-  audit(req, "doctor_schedule_updated", {
+  await audit(req, "doctor_schedule_updated", {
     entity: "doctor",
     entityId: req.params.id,
     details: `${windows.length} availability window(s) saved.`,

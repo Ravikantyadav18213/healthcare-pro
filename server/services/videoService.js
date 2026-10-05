@@ -70,8 +70,8 @@ function assertParticipant(appointment, user) {
   throw ApiError.forbidden("This consultation is not yours to join.");
 }
 
-export function getAppointmentOrThrow(id) {
-  const appointment = findAppointment.get(Number(id));
+export async function getAppointmentOrThrow(id) {
+  const appointment = await findAppointment.get(Number(id));
   if (!appointment) throw ApiError.notFound("Appointment not found.");
   return appointment;
 }
@@ -82,8 +82,8 @@ export function getAppointmentOrThrow(id) {
  * Turning video on mints the room immediately so the link is ready
  * before anyone tries to join.
  */
-export function setAppointmentMode(id, mode, user) {
-  const appointment = getAppointmentOrThrow(id);
+export async function setAppointmentMode(id, mode, user) {
+  const appointment = await getAppointmentOrThrow(id);
   const role = assertParticipant(appointment, user);
 
   /* Patients ask for a video visit; whether it happens is the
@@ -96,19 +96,19 @@ export function setAppointmentMode(id, mode, user) {
 
   if (mode === "video") {
     const room = appointment.videoRoom || generateRoomName();
-    setRoom.run(room, appointment.id);
+    await setRoom.run(room, appointment.id);
 
-    notify(appointment.userId, {
+    await notify(appointment.userId, {
       title: "Your appointment is now a video consultation",
       message: `${appointment.doctorName || "Your doctor"} — ${appointment.date} ${appointment.time}`,
       type: "info",
       link: "/my-appointments",
     });
 
-    return { ...getAppointmentOrThrow(id), joinUrl: joinUrlFor(room) };
+    return { ...(await getAppointmentOrThrow(id)), joinUrl: joinUrlFor(room) };
   }
 
-  setModeInPerson.run(appointment.id);
+  await setModeInPerson.run(appointment.id);
   return getAppointmentOrThrow(id);
 }
 
@@ -122,8 +122,8 @@ function joinUrlFor(room) {
  * The room is created on first request so an appointment that was
  * marked video before this feature existed still works.
  */
-export function getJoinInfo(id, user) {
-  const appointment = getAppointmentOrThrow(id);
+export async function getJoinInfo(id, user) {
+  const appointment = await getAppointmentOrThrow(id);
   const role = assertParticipant(appointment, user);
 
   if (!JOINABLE.includes(appointment.status)) {
@@ -140,7 +140,7 @@ export function getJoinInfo(id, user) {
     }
 
     room = generateRoomName();
-    setRoom.run(room, appointment.id);
+    await setRoom.run(room, appointment.id);
   }
 
   return {
